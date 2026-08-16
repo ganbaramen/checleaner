@@ -187,6 +187,33 @@ is touched again without a test alongside it.
 
 ---
 
+## Multi-print alignment added to checleaner.py (2026-08-15)
+
+Multi-print photos were balanced and left whole; `align_multi()` (method in
+`docs/PIPELINE.md` § 6) now also rotates the frame level and crops it centred
+on the prints when it safely can, at the original photo's aspect ratio.
+Python only for now — porting to `checleaner.html` is next steps item 2.
+
+Test file: `chekis/main/PXL_20260427_023437053.MP.jpg` (two touching prints,
+tilted ~1.5°) — verified both by inspecting the geometry directly (target and
+achieved crop ratio agreed to 4 decimal places; top/bottom margins agreed to
+0.001px, left/right to five nines) and by eye on the actual rendered output.
+
+Ran over all of `chekis/main/`'s 49 files: 11 ordinary multi-print photos got
+aligned (tilts found: -0.36° to 1.47°, all single-blob since touching prints
+in this folder merge into one paper-frame blob — the code doesn't require
+that, it's just what this folder happens to contain). Alignment and colour
+flags are independent, as intended: a few aligned files still routed to
+`review/` for pre-existing white-reference clipping, unrelated to the crop.
+
+Confirmed the "leave it whole" fallback also fires correctly:
+`20260521_073507` has two prints laid out on the diagonal, filling the frame
+corner to corner with almost no desk margin. A centred, level crop of that
+would need padding that isn't in the photo, so `align_multi()` correctly
+declined and it was left as an ordinary whole-frame multi.
+
+---
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

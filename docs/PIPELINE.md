@@ -157,6 +157,39 @@ Two brightness-based attempts failed first, both instructive:
 Edges have neither problem. The window boundary is always a hard full-width line
 regardless of what is in the picture or written on the border.
 
+## 6. Align multi-print photos (`checleaner.py` only, not yet ported)
+
+A multi-print photo isn't cropped to a card shape, but it can still be
+straightened and centred: `align_multi()` in `checleaner.py`.
+
+**Rotation.** `detect_all_prints()` runs the same paper-frame segmentation as
+single-print detection, but keeps every large blob instead of just the
+biggest, and reports each one's `minAreaRect` tilt. A rectangle looks the same
+every 90°, so tilt is folded into [-45°, 45°) before combining — two prints at
++44° and −44° are 2° apart, not 88°, and averaging the raw angles would get
+that wrong. The frame is rotated by the **area-weighted circular mean** of
+these tilts (weighted so a couple of small false-positive blobs can't outvote
+the real prints), so as many prints as possible land parallel to the frame
+edges.
+
+**Crop.** After rotating (with the canvas expanded so nothing is clipped),
+take the union bounding box of every detected blob in the rotated frame and
+crop around it centred at the bounding box's own centre — centring there
+makes the equal-margin requirement (top gap = bottom gap, left gap = right
+gap) automatic for *any* crop size, not something to solve for separately.
+The crop is then grown in whichever dimension the target aspect ratio (the
+original photo's, unrotated) doesn't already pin, so it's the tightest crop
+that both contains every print and matches that ratio.
+
+**Bail out, don't force it.** If that ideal crop would reach past the real
+photo into the blank corners the rotation opened up, `align_multi()` returns
+`None` and the photo is left whole — today's existing behaviour. Checked by
+mapping the crop's corners back through the inverse rotation and testing
+they still land inside the original frame. This matters: these photos are
+occasionally shot with prints laid out diagonally with barely any desk
+margin (see `docs/HISTORY.md`), where a centred crop simply isn't possible
+without padding that isn't there.
+
 ---
 
 ## The backs exception (not in the current code)

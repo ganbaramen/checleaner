@@ -70,8 +70,12 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
 1. **A regression test.** Both implementations are checked by hand right now.
    A fixture folder plus asserted white/black/aspect/orientation numbers would
    make any future change safe. The numbers to assert are in `docs/HISTORY.md`.
-2. **Split multi-print photos into separate crops.** Currently they are balanced
-   and left whole. The detector already counts blobs; the work is handling prints
-   that touch and merge into one blob.
-3. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
+2. **Port multi-print alignment (`align_multi()`, see `docs/PIPELINE.md` § 6)
+   to `checleaner.html`.** `checleaner.py` now rotates and centres a multi-print
+   photo when it can; the phone app still just balances and leaves it whole.
+3. **Split multi-print photos into separate crops.** Still balanced as one
+   image even after alignment. The detector already returns every blob
+   (`detect_all_prints()`); the work is handling prints that touch and merge
+   into one blob.
+4. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
    available in the Android share sheet. A `file://` page can be neither.

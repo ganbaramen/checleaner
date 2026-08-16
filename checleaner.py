@@ -184,25 +184,21 @@ class Detection:
     quad: np.ndarray | None = None   # 4x2 in full-res coords, long edge first
     aspect: float = 0.0
     fill: float = 0.0                # how rectangular the detected blob is
+    area: float = 0.0                # full-res px^2, for weighting multi-blob results
     n_blobs: int = 0
     ok: bool = False
     reason: str = ""
 
 
-def detect_print(path: str, size: int = 1100) -> Detection:
-    """Find a single print by its white paper frame: bright *and* near-neutral.
-
-    Ported from checleaner.html, which finds this more reliably than the
-    "everything that isn't desk" approach tried first: a print's dark photo
-    area is often as dark and as warm as walnut, so that mask comes out as a
-    hollow frame and any bright patch of desk merges into it. Bright-and-
-    neutral is the more distinctive feature -- desk is never both. On the
-    same 11 photos this landed aspects at 1.568-1.611 against the old
-    method's 1.54-1.62; see docs/PIPELINE.md.
+def _segment_prints(path: str, size: int = 1100):
+    """Paper-frame segmentation shared by detect_print and detect_all_prints:
+    bright *and* near-neutral, which desk never is. See docs/PIPELINE.md § 3
+    for why this beats segmenting "everything that isn't desk". Returns None
+    if the file can't be read.
     """
     img = cv2.imread(path)
     if img is None:
-        return Detection(reason="unreadable")
+        return None
     h, w = img.shape[:2]
     sc = size / max(h, w)
     small = cv2.resize(img, (int(w * sc), int(h * sc)), interpolation=cv2.INTER_AREA)
@@ -219,10 +215,11 @@ def detect_print(path: str, size: int = 1100) -> Detection:
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     big = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] > 0.03 * H * W]
-    if not big:
-        return Detection(n_blobs=0, reason="no print found")
+    return dict(labels=labels, stats=stats, big=big, sc=sc)
 
-    idx = max(big, key=lambda i: stats[i, cv2.CC_STAT_AREA])
+
+def _blob_detection(labels: np.ndarray, idx: int, sc: float) -> Detection | None:
+    """minAreaRect + fill for one connected component, scaled to full-res coords."""
     comp = (labels == idx).astype(np.uint8)
     contour = max(cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0],
                   key=cv2.contourArea)
@@ -230,7 +227,7 @@ def detect_print(path: str, size: int = 1100) -> Detection:
     rect = cv2.minAreaRect(hull)
     (rw, rh) = rect[1]
     if min(rw, rh) < 1:
-        return Detection(n_blobs=len(big), reason="degenerate fit")
+        return None
 
     box = cv2.boxPoints(rect)
     edges = [np.linalg.norm(box[(i + 1) % 4] - box[i]) for i in range(4)]
@@ -243,8 +240,133 @@ def detect_print(path: str, size: int = 1100) -> Detection:
         aspect=(edges[0] + edges[2]) / (edges[1] + edges[3]),
         # fill measured on the hull, so a frame with an unfilled middle still scores ~1
         fill=cv2.contourArea(hull) / (rw * rh),
-        n_blobs=len(big),
+        area=(rw * rh) / (sc * sc),
     )
+
+
+def detect_print(path: str, size: int = 1100) -> Detection:
+    """Find a single print by its white paper frame: bright *and* near-neutral.
+
+    Ported from checleaner.html, which finds this more reliably than the
+    "everything that isn't desk" approach tried first: a print's dark photo
+    area is often as dark and as warm as walnut, so that mask comes out as a
+    hollow frame and any bright patch of desk merges into it. Bright-and-
+    neutral is the more distinctive feature -- desk is never both. On the
+    same 11 photos this landed aspects at 1.568-1.611 against the old
+    method's 1.54-1.62; see docs/PIPELINE.md.
+    """
+    seg = _segment_prints(path, size)
+    if seg is None:
+        return Detection(reason="unreadable")
+    big = seg["big"]
+    if not big:
+        return Detection(n_blobs=0, reason="no print found")
+
+    idx = max(big, key=lambda i: seg["stats"][i, cv2.CC_STAT_AREA])
+    d = _blob_detection(seg["labels"], idx, seg["sc"])
+    if d is None:
+        return Detection(n_blobs=len(big), reason="degenerate fit")
+    d.n_blobs = len(big)
+    return d
+
+
+def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
+    """Every print-sized blob in the photo, not just the largest.
+
+    Used to align a multi-print photo (see align_multi), where every print
+    that segmented cleanly should count, not just the biggest one.
+    """
+    seg = _segment_prints(path, size)
+    if seg is None:
+        return []
+    dets = (_blob_detection(seg["labels"], idx, seg["sc"]) for idx in seg["big"])
+    return [d for d in dets if d is not None]
+
+
+def _tilt_deg(quad: np.ndarray) -> float:
+    """A blob's tilt from axis-aligned, folded into [-45, 45).
+
+    A rectangle looks the same every 90 degrees, so its long edge's raw angle
+    isn't the right thing to average across blobs -- two prints tilted +44 and
+    -44 degrees are actually within 2 degrees of each other, not 88.
+    """
+    v = quad[1] - quad[0]
+    deg = float(np.degrees(np.arctan2(v[1], v[0]))) % 90
+    return deg - 90 if deg >= 45 else deg
+
+
+def _dominant_tilt(dets: list[Detection]) -> float:
+    """Area-weighted circular mean of blob tilts, mod 90.
+
+    Area weighting means a couple of small false-positive blobs can't outvote
+    the actual prints. Circular averaging (via the angle-quadrupling trick,
+    since tilt has period 90 not 360) matters for the same wraparound reason
+    as _tilt_deg: a plain mean of +44 and -44 would land on 0, not on the true
+    answer of (roughly) +45 or -45.
+    """
+    tilts = np.radians([_tilt_deg(d.quad) for d in dets])
+    weights = np.array([d.area for d in dets])
+    theta4 = tilts * 4
+    mean4 = np.arctan2(np.average(np.sin(theta4), weights=weights),
+                        np.average(np.cos(theta4), weights=weights))
+    deg = np.degrees(mean4) / 4 % 90
+    return float(deg - 90 if deg >= 45 else deg)
+
+
+def align_multi(img: np.ndarray, dets: list[Detection]):
+    """Rotate and crop a multi-print photo so the prints sit level and centred.
+
+    Rotates the whole frame by the dominant tilt of the detected prints, so as
+    many as possible land parallel to the frame edges, then crops around their
+    union bounding box with equal margins top/bottom and left/right, at the
+    original photo's aspect ratio (whichever crop dimension that ratio doesn't
+    pin is grown to fit, so the crop is the tightest one that still contains
+    every print).
+
+    Returns None -- leave the photo whole, today's existing behaviour --
+    rather than force a crop that reaches into the blank corners the rotation
+    opens up. These photos usually have generous desk margin, so that should
+    be rare, but a photo where the prints already fill the frame edge to edge
+    can't be centred without padding that isn't there.
+    """
+    if not dets:
+        return None
+    h, w = img.shape[:2]
+    angle = _dominant_tilt(dets)
+
+    center = (w / 2, h / 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    cos, sin = abs(M[0, 0]), abs(M[0, 1])
+    new_w, new_h = int(h * sin + w * cos), int(h * cos + w * sin)
+    M[0, 2] += new_w / 2 - center[0]
+    M[1, 2] += new_h / 2 - center[1]
+    rotated = cv2.warpAffine(img, M, (new_w, new_h), flags=cv2.INTER_LANCZOS4)
+
+    pts = np.concatenate([d.quad for d in dets]).reshape(-1, 1, 2).astype(np.float32)
+    pts = cv2.transform(pts, M).reshape(-1, 2)
+    x0, y0 = pts.min(axis=0)
+    x1, y1 = pts.max(axis=0)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+
+    ratio = w / h
+    hh = max((y1 - y0) / 2, (x1 - x0) / 2 / ratio)
+    hw = hh * ratio
+    cx0, cx1, cy0, cy1 = cx - hw, cx + hw, cy - hh, cy + hh
+
+    # does the crop stay inside the photo's real (unrotated) footprint, or
+    # would it reach past an edge into the blank fill the rotation opened up?
+    invM = cv2.invertAffineTransform(M)
+    corners = np.array([[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]], np.float32)
+    back = cv2.transform(corners.reshape(-1, 1, 2), invM).reshape(-1, 2)
+    pad = 0.5
+    if not ((back[:, 0] >= -pad).all() and (back[:, 0] <= w + pad).all()
+            and (back[:, 1] >= -pad).all() and (back[:, 1] <= h + pad).all()):
+        return None
+
+    x0i, y0i = max(0, int(round(cx0))), max(0, int(round(cy0)))
+    x1i, y1i = min(new_w, int(round(cx1))), min(new_h, int(round(cy1)))
+    crop = rotated[y0i:y1i, x0i:x1i]
+    return crop, dict(align_tilt=round(angle, 2), align_n=len(dets))
 
 
 def warp(img: np.ndarray, quad: np.ndarray, out_w: int) -> np.ndarray:
@@ -482,6 +604,12 @@ def run(args) -> int:
                 if near_miss:
                     r.kind = "single?"
                     r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f})")
+                else:
+                    aligned = align_multi(img, detect_all_prints(path))
+                    if aligned is not None:
+                        img, align_stats = aligned
+                        r.kind = "aligned"
+                        r.stats.update(align_stats)
         else:
             r.kind = "nocrop"
 
@@ -521,13 +649,15 @@ def _write_report(path, files, results):
     with open(path, "w", newline="") as fh:
         wr = csv.writer(fh)
         wr.writerow(["file", "kind", "white_before", "black_before", "gain",
-                     "clipped_pct", "aspect", "fill", "border_ratio", "flags"])
+                     "clipped_pct", "aspect", "fill", "border_ratio",
+                     "align_tilt", "align_n", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
             wr.writerow([name, r.kind, s.get("white_before"), s.get("black_before"),
                          s.get("gain"), s.get("clipped_pct"), s.get("aspect"),
-                         s.get("fill"), s.get("border_ratio"), "; ".join(r.flags)])
+                         s.get("fill"), s.get("border_ratio"),
+                         s.get("align_tilt"), s.get("align_n"), "; ".join(r.flags)])
 
 
 def main():
