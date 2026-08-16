@@ -20,9 +20,14 @@ clothing inside the photo, which is bright but busy; flat paper border is the on
 large smooth bright region. The unclipped test matters because a blown highlight
 otherwise drags the estimate down and under-corrects.
 
-**Black — the darkest content.** Mean of the darkest 0.5% by luminance. Content
-dependent (dark hair vs. deep shadow vs. the film's own black), which is why the
-spread on the black point is always looser than on the white.
+**Black — the darkest content.** Mean of the pixels at or below the 0.5th
+percentile of luminance. Content dependent (dark hair vs. deep shadow vs. the
+film's own black), which is why the spread on the black point is always
+looser than on the white. Must be *at or below*, not strictly below: a photo
+with enough near-pure-black content (several dark-background prints, say) can
+pile more than 0.5% of pixels onto the frame's true minimum, making that
+minimum the percentile itself — a strict `<` then matches nothing, and a mean
+of nothing is a NaN that silently poisons the whole correction.
 
 **Desk — the surface.** Warm (R > B + 12), mid-dark (25 < luminance < 190),
 low-texture (below the 45th percentile of local sd). Skin tones and warm clothing

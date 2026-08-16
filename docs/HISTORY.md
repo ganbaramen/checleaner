@@ -53,6 +53,39 @@ size, visible if you crop deep into a dark area.
 no desk — whites and blacks only). All four came in cooler and darker than the
 walnut batch, needing 20–65% red gain against the batch's ±12%.
 
+### 24 more photos (2026-08-15)
+
+Spans `20260521`–`20260630`, mostly multi-print grids and a handful of singles.
+18 of 24 landed in `balanced/` (5 singles cropped cleanly, 13 multi-print left
+whole); 6 near-misses went to `review/`, all correctly declined rather than
+force-fit — including a genuinely overlapping two-print shot and, more
+surprisingly, a 7-print grid photo (`20260611_063147`) whose overall bounding
+box happened to land at aspect 1.516, inside the near-miss band, purely by
+coincidence. Not a bug: `review/` is exactly where an ambiguous-looking fit
+should go, and a glance at the photo makes the right call obvious. Worth
+knowing about if near-miss volume ever looks surprising on a future batch.
+
+| | white | black |
+|---|---|---|
+| before | 207.1, 211.9, 211.8 (sd 10.2/10.8/13.2) | 3.52, 2.44, 3.14 (sd 3.6/2.9/4.0) |
+| **after** | **239.5, 239.7, 239.5 (sd 1.5/1.6/2.0)** | **3.09, 2.70, 2.68 (sd 0.7/0.5/0.8)** |
+
+(18 balanced files only — the 6 in `review/` are uncropped and unflagged for
+colour, so mixing them in would understate the spread.)
+
+The 5 cleanly-cropped singles landed aspect 1.583–1.631, border ratio 2.16–2.41
+— comfortably inside tolerance, no hand fixes needed.
+
+**Bug found and fixed while processing this batch:** `20260630_140740` has a
+large near-pure-black region (multiple dark-background prints), which pushed
+its 0.5th-percentile luminance down to exactly the frame's true minimum.
+`measure()`'s black mask used a strict `<` against that percentile, so ties at
+the minimum matched nothing — an empty mask, a NaN black point, and a
+NaN-poisoned gain that would have written a corrupted file to `balanced/`
+without ever raising a flag. Changed to `<=` with a `lum.min()` fallback if
+still empty. Any future photo with a large enough dark region could have hit
+this; there was nothing folder-specific about it.
+
 ---
 
 ## sova_song_chekis/ — 12 files, 6 fronts + 6 backs

@@ -111,7 +111,13 @@ def measure(rgb: np.ndarray, min_desk_px: int = 40_000) -> Measurement:
         white_mask = bright & unclipped
     clipped = float((~unclipped)[bright].mean()) if bright.any() else 0.0
 
-    black_mask = lum < np.percentile(lum, 0.5)
+    # <=, not <: a photo with a large near-black region (a dark print background,
+    # say) can pile enough pixels onto the true minimum that it *is* the 0.5th
+    # percentile, and a strict less-than then matches nothing -- an empty mask
+    # means a NaN black point, silently poisoning the whole correction.
+    black_mask = lum <= np.percentile(lum, 0.5)
+    if not black_mask.any():
+        black_mask = lum <= lum.min()
 
     # desk: warm, mid-dark, low-texture. Skin and warm clothing inside a print
     # can leak in, which is why the desk correction stays damped.
