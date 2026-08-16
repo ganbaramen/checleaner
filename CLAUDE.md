@@ -17,6 +17,7 @@ checleaner/
   README.md              project overview
   docs/PIPELINE.md       the algorithm, why each step is the way it is
   docs/HISTORY.md        every batch processed, with before/after measurements
+  tools/detect.py        fast detection-only preview for named files (no colour pass)
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
     <other>/               ad hoc structure for a specific shoot, e.g. rancheki,
@@ -43,6 +44,15 @@ pending/done directories: just drop new photos in and rerun: only the new ones
 (or a file present in *neither* or, if something went wrong, present in *both*
 output dirs) get the expensive full-resolution pass. Pass `--force` after a code
 or calibration change, so every file benefits rather than just new ones.
+
+When you're iterating on *detection* geometry (which blob is a card, its aspect,
+which way up, one print vs several) rather than colour, don't rerun the batch —
+the whole-batch measurement pass dominates and detection doesn't need it. Run
+`tools/detect.py <files…>` to get run()'s single/single?/multi verdict on just the
+files you name, sub-second each; `--crop DIR` also writes the oriented crop of any
+single-card hit (warped from the raw photo — colour never moves a pixel) so you
+can eyeball orientation. It reuses `build_parser()`'s default thresholds so the
+preview can't drift from a real run.
 
 `report.csv` records every measurement and flag, including for files that
 passed — check it rather than assuming a clean run means clean output. Its

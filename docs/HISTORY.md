@@ -361,6 +361,31 @@ and lands in `review/` with a clear reason instead of a distorted crop.
 
 ---
 
+## Splitting multi-print photos into per-print crops: tried, backed out (2026-08-16)
+
+Attempted Next-steps item 3 -- carve a merged multi-print blob into one crop
+per print (`split_prints()` and friends: window-hole detection, union-find
+fragment clustering, dual portrait/landscape hypothesis). It ran end to end and
+handled real overlap, but was reverted, for two reasons:
+
+- **Wrong problem.** The actual ask behind "some images end up sideways" was only
+  to *detect* that a photo holds several prints so the pipeline stops cropping and
+  rotating it as if it were one card. That detection already exists: a multi-print
+  blob fails the tight single-card gate (aspect/fill/**solidity**, the last added
+  in the 2026-08-16 grid-as-single fix) and is left whole (`multi`/`aligned`) or
+  flagged `single?`. On the seven cited overlap photos, `tools/detect.py` confirms
+  none classify as `single`, so none can come out sideways. Splitting was never
+  needed to fix the reported symptom.
+- **The crops were unreliable anyway.** Reconstructed split quads don't actually
+  carry a real card's 1.593 aspect, and `warp()` force-fits every crop to
+  1800×2867 -- so mis-estimated quads came out visibly squished. Splitting stays a
+  future item, but the reconstruction needs to be evidence-tight enough to hit the
+  true card rectangle before it's worth shipping.
+
+Kept from the exercise: `tools/detect.py`, a detection-only preview that gives
+run()'s single/single?/multi verdict on named files sub-second each, so detection
+geometry can be iterated without grinding the whole batch's colour pass.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

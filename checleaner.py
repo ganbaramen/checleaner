@@ -813,7 +813,10 @@ def _write_review_notes(review_dir, files, results):
             fh.write("\n")
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
+    """Factored out of main() so tools/detect.py can borrow the exact same
+    default thresholds -- a detection preview that used different numbers than
+    a real run would be worse than useless."""
     p = argparse.ArgumentParser(
         description="Colour-balance and crop photos of instax mini prints.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -847,7 +850,11 @@ def main():
                    help="flag a crop with more than this many output px of desk on an edge")
     p.add_argument("--max-gain", type=float, default=2.2,
                    help="flag corrections stronger than this")
-    args = p.parse_args()
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
     if not os.path.isdir(args.folder):
         sys.exit(f"not a folder: {args.folder}")
     sys.exit(run(args))
