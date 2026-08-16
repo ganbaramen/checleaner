@@ -85,12 +85,15 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
 1. **A regression test.** Both implementations are checked by hand right now.
    A fixture folder plus asserted white/black/aspect/orientation numbers would
    make any future change safe. The numbers to assert are in `docs/HISTORY.md`.
-2. **Port multi-print alignment (`align_multi()`, see `docs/PIPELINE.md` § 6)
-   to `checleaner.html`.** `checleaner.py` now rotates and centres a multi-print
-   photo when it can; the phone app still just balances and leaves it whole.
-3. **Split multi-print photos into separate crops.** Still balanced as one
-   image even after alignment. The detector already returns every blob
-   (`detect_all_prints()`); the work is handling prints that touch and merge
-   into one blob.
+2. **Port multi-print alignment and splitting (`align_multi()` / `split_prints()`,
+   see `docs/PIPELINE.md` §§ 6–7) to `checleaner.html`.** `checleaner.py` now
+   rotates and centres a multi-print photo when it can, and splits it into
+   separate per-print crops when the prints are a single row or column; the
+   phone app still just balances and leaves it whole.
+3. **Extend `split_prints()` past a single row/column.** It deliberately
+   bails out on 2D grids, mixed portrait/landscape in one photo, and prints
+   overlapping in both directions at once (falls back to `align_multi()` or a
+   plain balance) — see `docs/PIPELINE.md` § 7 for why those were out of
+   scope for the first pass.
 4. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
    available in the Android share sheet. A `file://` page can be neither.

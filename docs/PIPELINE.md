@@ -247,8 +247,82 @@ cards, coincidentally landing near the same `k=2` ratio for reasons unrelated
 to any card's orientation. ~30% precision on real data. Abandoned rather than
 shipped even as a review flag — a flag wrong 7 times out of 10 trains you to
 ignore it, which defeats the point. See `docs/HISTORY.md` for the numbers.
-No fix currently exists for this; it needs per-print detection (next steps
-item 3 in `CLAUDE.md`), not a better frame-level heuristic.
+
+This is now largely fixed for the single-row/column case by § 7 below, since
+splitting each card out and running `orient()` on it individually reads each
+card's own content rather than guessing from the merged group's shape. Still
+unsolved for genuine 2D grids and mixed layouts.
+
+## 7. Split multi-print photos into per-print crops
+
+`align_multi()` treats a row or column of prints as one rigid group; it can
+straighten and centre them but can't separate them, and (per § 6 above) can't
+tell a sideways print from an upright one. `split_prints()` goes a level
+deeper: it tries to recover each **individual** print's own quad from a
+merged blob, so each one gets cropped and oriented on its own — including
+correctly detecting sideways prints, since `orient()` now runs on an actual
+single card instead of a merged group.
+
+Deliberately narrow, matching the difficulty of the underlying problem
+(recovering N possibly-overlapping rectangles from one blob is closer to
+general instance segmentation than a heuristic): only a single fan axis (one
+row or one column of prints), only a consistent per-print orientation. Real
+multi-print photos also show 2D grids, mixed portrait/landscape in one photo,
+and prints overlapping in both directions at once — `split_prints()` returns
+`None` on any of those rather than force a bad split, and `run()` falls back
+to `align_multi()` or a plain whole-frame balance, exactly as before this
+feature existed.
+
+**Finding each print despite overlap.** Overlapping prints hide the seam
+between their white borders — white paper on white paper leaves no visible
+edge, so there's no line to trace there even in principle. What *is* visible
+even under heavy overlap is wherever a print's edge crosses the *darker
+content* of the print beneath it. So `_window_holes()` looks for enclosed
+dark "holes" in the merged paper-frame mask (via flood fill from a seed
+that's guaranteed to be outside the blob, not the blob's own bbox corner,
+which isn't a safe assumption) — each hole is roughly one print's own photo
+content, which is real evidence for where that print is, even though its
+border mostly isn't visible.
+
+**A face can look like paper.** Bright, near-neutral skin tone can pass the
+same bright-and-neutral test used to find the border, splitting one print's
+window into disconnected fragments (found on a real photo where every
+card's window came out as two pieces, separated by a face). `_cluster_windows()`
+reunites fragments that share the same extent perpendicular to the fan axis,
+since real fragments of the same window are aligned that way and coincidental
+noise usually isn't.
+
+**Two hypotheses, not a guess.** As in § 6, a merged blob's aspect alone
+can't tell "K landscape cards stacked" from "K portrait cards in a row" —
+same numbers either way. `_split_hypothesis()` is tried under both
+orientations, and `split_prints()` only accepts the result if **exactly
+one** validates (its window count, spacing, and blob-edge proximity all fit)
+— both or neither validating means real ambiguity, not something to guess
+through.
+
+**Anchor to evidence, not a uniform grid.** Real overlap between prints is
+never perfectly even, so placing every print on an assumed uniform grid
+drifts by the accumulated spacing error — bleeding a sliver of the neighbour
+into every print but the outermost ones. Instead each print is anchored on
+its *own* detected window cluster's centre. The two outermost prints' outer
+edges use the blob's real boundary (not a guess, since nothing occludes them
+further); every other edge is an estimate, and is shrunk a few percent rather
+than trusted exactly — cropping a little into a print's own border reads far
+better than bleeding a neighbour's content in.
+
+**Known characteristic: split crops review more often than single crops.**
+On `chekis/main/`, single detected-and-cropped prints almost never trip the
+finished-crop desk check; split prints trip it much more often (measured
+~95% on one batch), even though the actual crops are correctly oriented and
+contain no bled-in neighbour content. The estimated (not directly measured)
+edges sometimes come up a few pixels short of the print's own margin, at
+which point the print's own content — a warm-toned background, dark hair —
+sits close enough to the edge to read as leftover desk to that check, which
+was tuned for actual desk colour, not "any warm, dark thing." This is the
+safety net working as designed, not silently shipping a flawed crop, so it's
+left as is rather than loosened — but expect more of a `chekis/main/`
+folder's `review/` to be split-related than before this feature, and that
+most of those need nothing more than a glance.
 
 ---
 
