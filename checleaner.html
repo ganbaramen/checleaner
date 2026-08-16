@@ -116,6 +116,24 @@ const ASPECT   = 86 / 54;     // instax mini card
 const OUT_W    = 1800;
 const OUT_H    = Math.round(OUT_W * ASPECT);
 const ANALYSIS = 1100;        // long edge used for measuring and detection
+// >= this many enclosed photo windows can't be one card (countWindows(), below).
+// checleaner.py calibrated its own threshold (7) the same way: one above the
+// worst genuine single card it measured across its library. This app's canvas
+// decoding and downscaling aren't pixel-identical to Python's, so its window
+// counts run a bit lower for the same photos -- calibrated separately here
+// against a real sweep (worst genuine single measured 5), not just copied.
+const MULTI_WINDOWS = 6;
+
+// Preferred crop shapes for a multi-print frame, tried in addition to the
+// frame's own ratio -- best fit (most balanced margins) wins. Add new shapes
+// here. No 9:16: an ultra-tall crop of prints on a desk reads as an accident,
+// not a composition (see checleaner.py's CROP_ASPECTS).
+const CROP_ASPECTS = [
+  ["4:3", 4 / 3],
+  ["3:4", 3 / 4],
+  ["1:1", 1],
+  ["16:9", 16 / 9],
+];
 
 /* ------------------------------------------------------------ colour space */
 
@@ -344,26 +362,31 @@ function detectPrint(data, w, h) {
   const cleaned = open(close(mask, w, h, 21), w, h, 8);
 
   const seen = new Uint8Array(n);
+  const label = new Int32Array(n);          // 0 = background, else blob id (1-based)
   const stack = new Int32Array(n);
   const blobs = [];
   for (let s = 0; s < n; s++) {
     if (!cleaned[s] || seen[s]) continue;
+    const id = blobs.length + 1;
     let top = 0, count = 0;
-    stack[top++] = s; seen[s] = 1;
+    let bx0 = w, by0 = h, bx1 = -1, by1 = -1;
+    stack[top++] = s; seen[s] = 1; label[s] = id;
     const pts = [];
     while (top) {
       const i = stack[--top]; count++;
       const x = i % w, y = (i / w) | 0;
+      if (x < bx0) bx0 = x; if (x > bx1) bx1 = x;
+      if (y < by0) by0 = y; if (y > by1) by1 = y;
       if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || !cleaned[i - 1] ||
           !cleaned[i + 1] || !cleaned[i - w] || !cleaned[i + w]) pts.push(x, y);
-      if (x > 0     && cleaned[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack[top++] = i - 1; }
-      if (x < w - 1 && cleaned[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack[top++] = i + 1; }
-      if (y > 0     && cleaned[i - w] && !seen[i - w]) { seen[i - w] = 1; stack[top++] = i - w; }
-      if (y < h - 1 && cleaned[i + w] && !seen[i + w]) { seen[i + w] = 1; stack[top++] = i + w; }
+      if (x > 0     && cleaned[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; label[i - 1] = id; stack[top++] = i - 1; }
+      if (x < w - 1 && cleaned[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; label[i + 1] = id; stack[top++] = i + 1; }
+      if (y > 0     && cleaned[i - w] && !seen[i - w]) { seen[i - w] = 1; label[i - w] = id; stack[top++] = i - w; }
+      if (y < h - 1 && cleaned[i + w] && !seen[i + w]) { seen[i + w] = 1; label[i + w] = id; stack[top++] = i + w; }
     }
-    if (count > 0.03 * n) blobs.push({ count, pts });
+    if (count > 0.03 * n) blobs.push({ count, pts, id, bbox: [bx0, by0, bx1, by1] });
   }
-  if (!blobs.length) return { quad: null, blobs: 0, all: [] };
+  if (!blobs.length) return { quad: null, blobs: 0, all: [], windows: 0 };
 
   blobs.sort((a, b) => b.count - a.count);
   // every print-sized blob's rectangle, largest first -- align() needs them all,
@@ -374,9 +397,87 @@ function detectPrint(data, w, h) {
   });
   const hull = convexHull(blobs[0].pts);
   const rect = minAreaRect(hull);
-  // fill measured on the hull, so a frame with an unfilled middle still scores 1
-  return { quad: rect.quad, aspect: rect.aspect,
-           fill: polyArea(hull) / rect.area, blobs: blobs.length, all };
+  const { windows, closedArea } = countWindows(label, w, blobs[0].id, blobs[0].bbox);
+  const hullArea = polyArea(hull);
+  // fill measured on the hull, so a frame with an unfilled middle still scores 1.
+  // solidity is the blob's own OUTER-boundary area over its hull area -- not raw
+  // pixel count, which would undercount every card (the photo window is a hole
+  // in the paper mask, not paper itself). closedArea already fills that hole
+  // (countWindows finds it the same way), giving the area cv2.contourArea would
+  // trace on the outer boundary. A real card's border has no seams, so its outer
+  // boundary already *is* its hull (solidity ~= 1.0); a tight grid of several
+  // cards leaves notches at the seams that only the hull smooths over, so it
+  // measures noticeably lower -- catches a flush grid that fill (and aspect)
+  // alone can pass outright. Port of checleaner.py's solidity check.
+  return { quad: rect.quad, aspect: rect.aspect, fill: hullArea / rect.area,
+           solidity: closedArea / hullArea, blobs: blobs.length, all, windows };
+}
+
+/* Returns { windows, closedArea } for the largest paper blob -- port of
+   checleaner.py's count_windows(). Several prints laid over each other merge
+   their white borders into one blob invisibly (white paper on white paper
+   leaves no seam for fill to catch), but each print's own picture stays dark
+   and separate: an enclosed hole in the paper mask. One card has one window,
+   occasionally split into a couple of pieces where bright content (a white
+   blouse, say) bridges it to the border; several merged prints run much
+   higher. See checleaner.py's docstring for the numbers MULTI_WINDOWS is
+   built on -- the same threshold is used here.
+
+   closedArea (paper pixels plus every enclosed hole) is a side effect of the
+   same flood fill, reused by detectPrint() to compute solidity: it is the
+   area an outer-boundary trace would enclose, which cv2.contourArea gets
+   directly from cv2.findContours(..., RETR_EXTERNAL) but this port has to
+   derive by filling the holes back in.
+
+   The flood fill seeds from a padded border, not the bbox corner: the corner
+   of a tilted blob's own bbox can be *inside* the blob, and seeding there
+   would mark the wrong region as exterior. */
+function countWindows(label, w, blobId, bbox) {
+  const [bx0, by0, bx1, by1] = bbox;
+  const bw = bx1 - bx0 + 1, bh = by1 - by0 + 1;
+  const pw = bw + 2, ph = bh + 2;
+  const notPaper = new Uint8Array(pw * ph);
+  notPaper.fill(1);
+  for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++)
+    if (label[(by0 + y) * w + (bx0 + x)] === blobId) notPaper[(y + 1) * pw + (x + 1)] = 0;
+
+  const filled = notPaper.slice();
+  const stack = new Int32Array(pw * ph);
+  let top = 0;
+  stack[top++] = 0; filled[0] = 2;
+  while (top) {
+    const i = stack[--top];
+    const x = i % pw, y = (i / pw) | 0;
+    if (x > 0      && notPaper[i - 1]  === 1 && filled[i - 1]  !== 2) { filled[i - 1]  = 2; stack[top++] = i - 1; }
+    if (x < pw - 1 && notPaper[i + 1]  === 1 && filled[i + 1]  !== 2) { filled[i + 1]  = 2; stack[top++] = i + 1; }
+    if (y > 0      && notPaper[i - pw] === 1 && filled[i - pw] !== 2) { filled[i - pw] = 2; stack[top++] = i - pw; }
+    if (y < ph - 1 && notPaper[i + pw] === 1 && filled[i + pw] !== 2) { filled[i + pw] = 2; stack[top++] = i + pw; }
+  }
+  const holes = new Uint8Array(pw * ph);
+  let closedArea = 0;               // paper pixels + every enclosed hole -- the
+  for (let i = 0; i < pw * ph; i++) {   // area an outer-boundary trace would enclose
+    holes[i] = (notPaper[i] === 1 && filled[i] !== 2) ? 1 : 0;
+    if (notPaper[i] === 0 || holes[i]) closedArea++;
+  }
+
+  const seen = new Uint8Array(pw * ph);
+  const areaMin = 0.005 * bw * bh;
+  let n = 0;
+  for (let s = 0; s < pw * ph; s++) {
+    if (!holes[s] || seen[s]) continue;
+    let cTop = 0, count = 0;
+    stack[cTop++] = s; seen[s] = 1;
+    while (cTop) {
+      const i = stack[--cTop]; count++;
+      const x = i % pw, y = (i / pw) | 0;
+      if (x > 0      && holes[i - 1]  && !seen[i - 1])  { seen[i - 1]  = 1; stack[cTop++] = i - 1; }
+      if (x < pw - 1 && holes[i + 1]  && !seen[i + 1])  { seen[i + 1]  = 1; stack[cTop++] = i + 1; }
+      if (y > 0      && holes[i - pw] && !seen[i - pw]) { seen[i - pw] = 1; stack[cTop++] = i - pw; }
+      if (y < ph - 1 && holes[i + pw] && !seen[i + pw]) { seen[i + pw] = 1; stack[cTop++] = i + pw; }
+    }
+    if (count > areaMin) n++;
+  }
+  return { windows: n, closedArea };
 }
 
 function polyArea(poly) {
@@ -635,9 +736,67 @@ function dominantTilt(dets) {
   return deg >= 45 ? deg - 90 : deg;
 }
 
-/* Returns { img, tilt, n } or null (leave the frame whole) when the level crop
-   would reach past the real photo into the blank corners the rotation opens up.
-   `srcCanvas` holds the already colour-corrected full-resolution frame. */
+/* Recentre on the true paper extent, or null to keep the blob bbox's own
+   centre. Port of checleaner.py's _paper_center(): bright and near-neutral,
+   opened but NOT closed (the close is what let the detection blob bridge into
+   desk glare in the first place, sliding the naive centred crop off the
+   prints -- see checleaner.py's docs/HISTORY.md entry). Scans the WHOLE
+   rotated frame, not just the blob's bbox, exactly like the Python: the
+   size-ratio and shift guards below are what keep a stray bright patch
+   elsewhere in the frame from pulling the centre somewhere wrong, so no
+   region restriction is needed going in. */
+function paperCenter(rc, bbox) {
+  const [x0, y0, x1, y1] = bbox, bw = x1 - x0, bh = y1 - y0;
+  const scale = 0.25;
+  const sw = Math.max(1, Math.round(rc.width * scale)), sh = Math.max(1, Math.round(rc.height * scale));
+  const small = document.createElement("canvas");
+  small.width = sw; small.height = sh;
+  const sctx = small.getContext("2d", { willReadFrequently: true });
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(rc, 0, 0, sw, sh);
+  const { L, A, B } = toLab(blurRGBA(sctx.getImageData(0, 0, sw, sh).data, sw, sh, 2), sw, sh);
+
+  const n = sw * sh;
+  const sample = [];
+  for (let i = 0; i < n; i += 5) sample.push(L[i]);
+  sample.sort((a, b) => a - b);
+  const hi = sample[Math.floor(0.99 * (sample.length - 1))];
+  const mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++)
+    mask[i] = (L[i] > 0.62 * hi && Math.hypot(A[i] - 128, B[i] - 128) < 16) ? 1 : 0;
+  const opened = open(mask, sw, sh, 2);
+
+  let cnt = 0, xs0 = Infinity, ys0 = Infinity, xs1 = -Infinity, ys1 = -Infinity;
+  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
+    if (!opened[y * sw + x]) continue;
+    cnt++;
+    if (x < xs0) xs0 = x; if (x > xs1) xs1 = x;
+    if (y < ys0) ys0 = y; if (y > ys1) ys1 = y;
+  }
+  if (cnt < 200) return null;
+
+  const px0 = xs0 / scale, py0 = ys0 / scale, px1 = xs1 / scale, py1 = ys1 / scale;
+  const pw = px1 - px0, ph = py1 - py0;
+  // paper span should track the blob's: much smaller means it missed prints,
+  // much larger means it grabbed something past them (a bright wall, blown desk)
+  if (!(0.5 * bw <= pw && pw <= 1.3 * bw && 0.5 * bh <= ph && ph <= 1.3 * bh)) return null;
+  const pcx = (px0 + px1) / 2, pcy = (py0 + py1) / 2;
+  // only a gentle recentre; a big shift means the paper read is unreliable
+  if (Math.abs(pcx - (x0 + x1) / 2) > 0.15 * bw || Math.abs(pcy - (y0 + y1) / 2) > 0.15 * bh) return null;
+  return [pcx, pcy];
+}
+
+/* Returns { img, tilt, n, crop } or null (leave the frame whole) when even the
+   fallback crop would reach past the real photo into the blank corners the
+   rotation opens up. `srcCanvas` holds the already colour-corrected
+   full-resolution frame.
+
+   Note: unlike checleaner.py, there is no face-derived turn to fold in here --
+   this app has no auto content rotation (see the rotate buttons instead), so
+   the crop shape is chosen for the frame as levelled, before any manual
+   rotation the user applies afterwards. Tapping a rotate button on a 16:9
+   result will look like the excluded 9:16 shape, but that is the user's own
+   choice made with the image in front of them, not a misclassification. */
 function alignMulti(srcCanvas, dets) {
   if (!dets.length) return null;
   const w = srcCanvas.width, h = srcCanvas.height;
@@ -663,23 +822,42 @@ function alignMulti(srcCanvas, dets) {
     const [X, Y] = map(p[0], p[1]);
     if (X < x0) x0 = X; if (X > x1) x1 = X; if (Y < y0) y0 = Y; if (Y > y1) y1 = Y;
   }
-  const mcx = (x0 + x1) / 2, mcy = (y0 + y1) / 2, ratio = w / h;
-  const hh = Math.max((y1 - y0) / 2, (x1 - x0) / 2 / ratio), hw = hh * ratio;
-  const cx0 = mcx - hw, cx1 = mcx + hw, cy0 = mcy - hh, cy1 = mcy + hh;
+  let [mcx, mcy] = [(x0 + x1) / 2, (y0 + y1) / 2];
+  const recentred = paperCenter(rc, [x0, y0, x1, y1]);
+  if (recentred) [mcx, mcy] = recentred;
+  const bw2 = (x1 - x0) / 2, bh2 = (y1 - y0) / 2;
 
-  // would the crop reach past the photo's real footprint into blank fill?
+  // does a crop stay inside the photo's real (unrotated) footprint, or would
+  // it reach past an edge into the blank fill the rotation opened up?
   const det = a * a + b * b, ia = a / det, ib = -b / det;
   const itx = -(ia * tx - ib * ty), ity = -(ib * tx + ia * ty);
   const invMap = (x, y) => [ia * x - ib * y + itx, ib * x + ia * y + ity];
   const pad = 0.5;
-  for (const [px, py] of [[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]]) {
-    const [bx, by] = invMap(px, py);
-    if (bx < -pad || bx > w + pad || by < -pad || by > h + pad) return null;
+  const fits = (hw, hh) => [[mcx - hw, mcy - hh], [mcx + hw, mcy - hh],
+                            [mcx + hw, mcy + hh], [mcx - hw, mcy + hh]]
+    .every(([px, py]) => { const [bx, by] = invMap(px, py); return bx >= -pad && bx <= w + pad && by >= -pad && by <= h + pad; });
+
+  let best = null;
+  for (const [label, r] of CROP_ASPECTS) {
+    const hh = Math.max(bh2, bw2 / r), hw = hh * r;
+    const score = Math.abs((hw - bw2) - (hh - bh2));
+    if (fits(hw, hh) && (!best || score < best.score)) best = { score, label, hw, hh };
   }
+  let hw, hh, cropLabel;
+  if (best) {
+    ({ hw, hh, label: cropLabel } = best);
+  } else {
+    const ratio = w / h;                    // the frame's own shape -- pre-CROP_ASPECTS fallback
+    hh = Math.max(bh2, bw2 / ratio); hw = hh * ratio;
+    if (!fits(hw, hh)) return null;
+    cropLabel = "original";
+  }
+
+  const cx0 = mcx - hw, cx1 = mcx + hw, cy0 = mcy - hh, cy1 = mcy + hh;
   const xi = Math.max(0, Math.round(cx0)), yi = Math.max(0, Math.round(cy0));
   const xe = Math.min(nw, Math.round(cx1)), ye = Math.min(nh, Math.round(cy1));
   if (xe - xi < 2 || ye - yi < 2) return null;
-  return { img: rctx.getImageData(xi, yi, xe - xi, ye - yi), tilt: angle, n: dets.length };
+  return { img: rctx.getImageData(xi, yi, xe - xi, ye - yi), tilt: angle, n: dets.length, crop: cropLabel };
 }
 
 /* -------------------------------------------------------------- EXIF splice */
@@ -808,6 +986,7 @@ async function process(file) {
   const small = document.createElement("canvas");
   small.width = aw; small.height = ah;
   const sctx = small.getContext("2d", { willReadFrequently: true });
+  sctx.imageSmoothingQuality = "high";  // closer to cv2's INTER_AREA than the browser default
   sctx.drawImage(full, 0, 0, aw, ah);
   const sdata = sctx.getImageData(0, 0, aw, ah);
   drawTo($("before"), sdata);
@@ -827,8 +1006,17 @@ async function process(file) {
   const gmax = Math.max(...gain), gmin = Math.min(...gain);
   if (gmax > 2.2 || gmin < 1 / 2.2) flags.push(`strong correction (gain ${gain.map(v => v.toFixed(2)).join(", ")})`);
 
-  const isSingle = det.quad && det.blobs === 1 && det.aspect >= 1.53 && det.aspect <= 1.65 && det.fill >= 0.93;
-  let out, info = { aspect: det.aspect, fill: det.fill, blobs: det.blobs };
+  let isSingle = det.quad && det.blobs === 1 && det.aspect >= 1.53 && det.aspect <= 1.65
+                && det.fill >= 0.93 && det.solidity >= 0.97;
+  let nearMiss = det.quad && det.blobs === 1 && det.aspect >= 1.40 && det.aspect <= 1.90;
+  // A blob enclosing many photo windows can't be one card, even if its outline
+  // alone passes the tight test outright -- a tidy row of prints can (see
+  // countWindows() and checleaner.py's count_windows()). Only the high side is
+  // evidence, so this only ever takes single/near-miss away, never grants either.
+  if (isSingle || nearMiss) {
+    if (det.windows >= MULTI_WINDOWS) { isSingle = false; nearMiss = false; }
+  }
+  let out, info = { aspect: det.aspect, fill: det.fill, blobs: det.blobs, windows: det.windows };
 
   if (isSingle) {
     setStatus("straightening and cropping…");
@@ -890,10 +1078,10 @@ async function process(file) {
     out = fd;
     info.cropped = false;
 
-    // A near-miss (one roughly card-shaped blob failing the tight test) is a bad
-    // single-card fit worth a human look; anything else is an ordinary
-    // multi-print shot, so level and centre it around the prints.
-    const nearMiss = det.quad && det.blobs === 1 && det.aspect >= 1.40 && det.aspect <= 1.90;
+    // A near-miss (one roughly card-shaped blob failing the tight test, and
+    // not overruled by the window backstop above) is a bad single-card fit
+    // worth a human look; anything else is an ordinary multi-print shot, so
+    // level and centre it around the prints.
     if (nearMiss) {
       flags.push(`couldn't fit one card (aspect ${det.aspect.toFixed(2)}) — left uncropped`);
     } else {
@@ -904,7 +1092,7 @@ async function process(file) {
       const aligned = alignMulti(cc, detsFull);
       if (aligned) {
         out = aligned.img;
-        info.aligned = true; info.tilt = aligned.tilt; info.n = aligned.n;
+        info.aligned = true; info.tilt = aligned.tilt; info.n = aligned.n; info.crop = aligned.crop;
       }
     }
   }
@@ -938,7 +1126,11 @@ function report(res) {
     rows.push(["output", `${OUT_W} × ${OUT_H}`]);
   } else {
     rows.push(["prints seen", String(res.info.blobs)]);
-    if (res.info.aligned) rows.push(["levelled", `${res.info.tilt.toFixed(1)}° · ${res.info.n} region${res.info.n > 1 ? "s" : ""}`]);
+    if (res.info.windows) rows.push(["photo windows", String(res.info.windows)]);
+    if (res.info.aligned) {
+      rows.push(["levelled", `${res.info.tilt.toFixed(1)}° · ${res.info.n} region${res.info.n > 1 ? "s" : ""}`]);
+      rows.push(["crop shape", res.info.crop]);
+    }
   }
   $("stats").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
   $("stage").classList.add("on");

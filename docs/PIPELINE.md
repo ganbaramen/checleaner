@@ -131,6 +131,23 @@ overrule it too. Only the high side is evidence — a low count proves nothing
 for review rather than being forced through. The count lands in `report.csv`'s
 `windows` column.
 
+**Both checks are ported to `checleaner.html`** (`detectPrint()`'s `solidity`
+and `countWindows()`), but not with identical numbers, because the two
+implementations don't decode/downscale a JPEG the same way (`cv2.resize` with
+`INTER_AREA` vs a canvas `drawImage`, even with `imageSmoothingQuality:
+"high"`) and JS has no `cv2.findContours(..., RETR_EXTERNAL)` to hand it a raw
+contour area — `solidity` there is `closedArea / hullArea`, where `closedArea`
+reuses `countWindows()`'s own hole-fill (paper pixels plus every enclosed
+hole) to approximate what an external contour would enclose. On a full sweep
+of `chekis/main/`, JS's window counts run a bit lower than Python's for the
+same photos, so `MULTI_WINDOWS` is calibrated separately for JS (**6**, not
+7) against JS's own worst-genuine-single measurement, not copied from
+Python's. One real single card was found where JS's mask has a genuine small
+gap Python's doesn't (bright marker writing near the border), dropping its
+solidity to ~0.56 and demoting it to a flagged near-miss instead of an
+auto-crop — accepted as the safe failure direction (a flag costs a look;
+a wrongly-accepted grid costs a mangled photo), not chased further.
+
 ## 4. Crop
 
 Perspective-transform the quad onto an 1800 × 2867 canvas. Not a rotated-rectangle
@@ -219,11 +236,17 @@ on every one, ratios shifting by hundredths.
 A multi-print photo isn't cropped to a card shape, but it can still be
 straightened and centred: `align_multi()` in `checleaner.py`.
 
-The **levelling** half (this section) is ported to `checleaner.html`
-(`alignMulti()`, same tilt maths and footprint check). The **content
-reorientation** half below is desktop-only — it needs a face model the offline
-single-file app can't ship — so the phone app instead offers manual ⟲/⟳/180°
-rotate buttons to stand a levelled result upright by hand.
+The **levelling, best-fit crop, and margin recentre** in this section are all
+ported to `checleaner.html` (`alignMulti()` + `paperCenter()`, same tilt maths,
+`CROP_ASPECTS` list, and footprint check). The **content reorientation** half
+below is desktop-only — it needs a face model the offline single-file app
+can't ship — so the phone app instead offers manual ⟲/⟳/180° rotate buttons to
+stand a levelled result upright by hand. One consequence: `checleaner.html`
+picks the `CROP_ASPECTS` shape for the frame *as levelled*, not the final
+orientation, since it doesn't know the eventual turn in advance the way
+`checleaner.py` does — tapping a rotate button afterward can turn a 4:3 result
+into 3:4 (or the reverse), which is the user's own choice made with the image
+in front of them, not a misclassification.
 
 **Rotation.** `detect_all_prints()` runs the same paper-frame segmentation as
 single-print detection, but keeps every large blob instead of just the

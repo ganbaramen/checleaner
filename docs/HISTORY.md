@@ -534,6 +534,50 @@ writes nothing. A duplicate output (present in both `balanced/` and `review/`,
 the existing "something went wrong" signal) still forces a fresh remeasure, not
 just a fresh reprocess, since it isn't eligible for the cache either.
 
+## checleaner.html catches up on multi-print handling (2026-08-16)
+
+Ported the multi-print-related work from this session's Python changes to the
+phone app: `CROP_ASPECTS` best-fit cropping, the photo-window backstop
+(`countWindows()`), and the paper-recentre fix -- plus `solidity`, an earlier
+addition that had never made it into the HTML at all.
+
+Porting `solidity` first paid for itself: it exposed a live bug. Without it,
+`detectPrint()`'s single-card gate was just aspect+fill, so a flush 2x2 grid
+(`PXL_20260131_165923174`, four cards laid edge to edge with no gaps) passed
+outright and would have been warped into one mangled card. Solidity there is
+`closedArea / hullArea`, where `closedArea` reuses `countWindows()`'s own
+hole-filling (the JS port has no `cv2.findContours(RETR_EXTERNAL)` to hand it
+a ready-made outer-contour area, so it derives the same quantity by filling
+the paper mask's enclosed holes back in). First attempt used raw pixel count
+instead of the filled area, and measured ~0.4-0.76 for every real single card
+in the library -- because a card's photo *window* is a hole in the paper mask,
+not paper, so raw count always undercounts a real card too. Fixed once
+`closedArea` was threaded through; the grid then measured 0.946, comfortably
+under the 0.97 gate, while 23 of 25 known singles landed at 0.99-1.0.
+
+Window counts needed their own calibration, not Python's copied over: JS's
+canvas decode/downscale isn't pixel-identical to `cv2.resize(INTER_AREA)`
+(tried `imageSmoothingQuality: "high"`; helped a little, didn't close the
+gap), so the same real photos count noticeably fewer windows in JS. A sweep of
+all 110 files in `chekis/main/` found JS's worst genuine single at 5 windows,
+not Python's 6, so `MULTI_WINDOWS` is **6** here, calibrated the same way
+Python calibrated its own 7 (one above the worst genuine single measured) but
+against JS's own distribution.
+
+Full-batch comparison against Python's `report.csv` classifications: 95/110
+agreed. Of the 15 that didn't, 7 are net improvements (a near-miss Python
+itself left for review, JS's window backstop correctly auto-aligns), 6 are
+pre-existing JS/Python blob-detection divergence unrelated to this session's
+changes (already present before this port, just newly visible from doing a
+full comparison for the first time), and 1 is a real, narrow regression:
+`PXL_20260327_154304657`, a genuine single card with bright marker writing
+near its border, where JS's mask has a small real gap Python's doesn't,
+dropping solidity to ~0.56 and demoting it to a flagged near-miss instead of
+an auto-crop. Accepted rather than chased further -- the failure direction is
+safe (a flag costs a look; a wrongly-accepted grid, the bug solidity fixes,
+costs a mangled photo) -- and the file still gets a correct colour-balanced
+whole image, just not the auto-crop.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

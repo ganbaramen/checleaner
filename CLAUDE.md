@@ -122,14 +122,16 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    by hand — port the same asserted numbers to a Playwright-driven check so both
    implementations are safe to change. Optionally, add real-photo golden numbers
    from `docs/HISTORY.md` to the opt-in tier.
-2. **Catch `checleaner.html` up on multi-print handling.** Levelling
-   (`align_multi()`) is ported as `alignMulti()`, but two later additions are
-   not: the best-fit `CROP_ASPECTS` crop (tried in Python first — the JS still
-   crops at the frame's own ratio) and content reorientation
-   (`content_rotation()`) — the app offers manual ⟲/⟳/180° rotate buttons
-   instead, since the offline single-file page can't ship a face model. Closing the gap would need a JS face detector
-   (e.g. onnxruntime-web + the same YuNet model), which also means solving how a
-   `file://` page loads WASM offline — see item 4.
+2. **Give `checleaner.html` a face detector for content reorientation.**
+   Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
+   (`countWindows()`), and solidity are all now ported (see `docs/PIPELINE.md`
+   §§ 3, 6) — window counts and the `MULTI_WINDOWS` threshold are calibrated
+   separately from Python's, since canvas image decoding isn't pixel-identical
+   to `cv2`'s. What's still desktop-only is `content_rotation()`: the app
+   offers manual ⟲/⟳/180° rotate buttons instead, since the offline
+   single-file page can't ship a face model. Closing the gap would need a JS
+   face detector (e.g. onnxruntime-web + the same YuNet model), which also
+   means solving how a `file://` page loads WASM offline — see item 4.
 3. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
