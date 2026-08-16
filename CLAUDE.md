@@ -112,11 +112,13 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    by hand — port the same asserted numbers to a Playwright-driven check so both
    implementations are safe to change. Optionally, add real-photo golden numbers
    from `docs/HISTORY.md` to the opt-in tier.
-2. **Port multi-print alignment (`align_multi()` + `content_rotation()`, see
-   `docs/PIPELINE.md` § 6) to `checleaner.html`.** `checleaner.py` now levels a
-   multi-print photo and stands it upright from its content; the phone app still
-   just balances and leaves it whole. (Reorientation there would need a JS face
-   detector, e.g. onnxruntime-web with the same YuNet model.)
+2. **Auto-reorient multi-print photos in `checleaner.html`.** Levelling
+   (`align_multi()`) is now ported to the phone app as `alignMulti()`; content
+   reorientation (`content_rotation()`) is *not* — the app offers manual
+   ⟲/⟳/180° rotate buttons instead, since the offline single-file page can't
+   ship a face model. Closing the gap would need a JS face detector
+   (e.g. onnxruntime-web + the same YuNet model), which also means solving how a
+   `file://` page loads WASM offline — see item 4.
 3. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge

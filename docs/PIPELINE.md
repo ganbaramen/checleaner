@@ -193,10 +193,16 @@ edge by cropping and looking directly at the row it lands on, and re-verified
 against all 12 known-good singles in `chekis/rancheki/` — identical flip decision
 on every one, ratios shifting by hundredths.
 
-## 6. Align multi-print photos (`checleaner.py` only, not yet ported)
+## 6. Align multi-print photos
 
 A multi-print photo isn't cropped to a card shape, but it can still be
 straightened and centred: `align_multi()` in `checleaner.py`.
+
+The **levelling** half (this section) is ported to `checleaner.html`
+(`alignMulti()`, same tilt maths and footprint check). The **content
+reorientation** half below is desktop-only — it needs a face model the offline
+single-file app can't ship — so the phone app instead offers manual ⟲/⟳/180°
+rotate buttons to stand a levelled result upright by hand.
 
 **Rotation.** `detect_all_prints()` runs the same paper-frame segmentation as
 single-print detection, but keeps every large blob instead of just the

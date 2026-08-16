@@ -412,6 +412,20 @@ turned, the other 44 (including a 0°-vs-180° near-tie at 1.61 vs 1.82 that the
 `~/.cache/checleaner/`; without it the step no-ops and the old leave-it-level
 behaviour returns.
 
+## Multi-print alignment ported to the phone app (2026-08-16)
+
+`checleaner.html` used to balance a multi-print photo and leave it whole. It now
+levels and centres it too: `alignMulti()` is a faithful port of `align_multi()`
+(same fold-to-[-45,45) tilt, area-weighted circular mean, footprint check).
+Verified with Playwright against the five multi-print files — output dimensions
+match the desktop tool's to within a pixel or two (e.g. 015731072: web
+2479×3291 vs Python 2482×3297).
+
+Content reorientation (faces) was *not* ported — an offline single-file page
+can't ship an ONNX model. Instead the app gained ⟲ 90° / 180° / ⟳ 90° buttons,
+so a levelled-but-sideways result is one tap from upright. Single-card output is
+unchanged (still 1800×2867, still flags residual desk).
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

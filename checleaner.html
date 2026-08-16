@@ -74,7 +74,9 @@
 
   <div class="row">
     <button id="save">Save image</button>
-    <button id="rotate" class="ghost">Rotate 180°</button>
+    <button id="rotL" class="ghost" title="Rotate 90° left">⟲ 90°</button>
+    <button id="rot180" class="ghost" title="Rotate 180°">180°</button>
+    <button id="rotR" class="ghost" title="Rotate 90° right">⟳ 90°</button>
   </div>
 
   <details>
@@ -356,14 +358,20 @@ function detectPrint(data, w, h) {
     }
     if (count > 0.03 * n) blobs.push({ count, pts });
   }
-  if (!blobs.length) return { quad: null, blobs: 0 };
+  if (!blobs.length) return { quad: null, blobs: 0, all: [] };
 
   blobs.sort((a, b) => b.count - a.count);
+  // every print-sized blob's rectangle, largest first -- align() needs them all,
+  // not just the biggest, to level a multi-print photo
+  const all = blobs.map(bl => {
+    const hu = convexHull(bl.pts), rc = minAreaRect(hu);
+    return { quad: rc.quad, area: rc.area };
+  });
   const hull = convexHull(blobs[0].pts);
   const rect = minAreaRect(hull);
   // fill measured on the hull, so a frame with an unfilled middle still scores 1
   return { quad: rect.quad, aspect: rect.aspect,
-           fill: polyArea(hull) / rect.area, blobs: blobs.length };
+           fill: polyArea(hull) / rect.area, blobs: blobs.length, all };
 }
 
 function polyArea(poly) {
@@ -582,6 +590,93 @@ function rotate180(img) {
   return out;
 }
 
+/* Quarter turn. cw = clockwise. Dimensions swap, so this returns fresh ImageData. */
+function rotate90(img, cw) {
+  const { width: w, height: h, data: d } = img;
+  const out = new ImageData(h, w);                         // dims swap
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const nx = cw ? h - 1 - y : y;
+    const ny = cw ? x : w - 1 - x;
+    const s = (y * w + x) * 4, t = (ny * h + nx) * 4;
+    out.data[t] = d[s]; out.data[t + 1] = d[s + 1]; out.data[t + 2] = d[s + 2]; out.data[t + 3] = 255;
+  }
+  return out;
+}
+
+/* -------------------------------------------------- multi-print alignment */
+/* Port of checleaner.py's align_multi(): level and centre a photo of several
+   prints. A rectangle reads the same every 90 degrees, so a blob's raw long-edge
+   angle can't be averaged directly -- fold each tilt into [-45, 45) and take an
+   area-weighted circular mean (the angle-quadrupling trick, since tilt has
+   period 90 not 360) so a couple of small false blobs can't outvote the prints.
+
+   Note: this only *levels* the frame. It can't tell up from down or a quarter
+   turn -- that needs to read print content, which the desktop tool does with a
+   face detector but this offline single-file app can't ship. Use the rotate
+   buttons to stand the result upright by hand. */
+function tiltDeg(quad) {
+  const vx = quad[1][0] - quad[0][0], vy = quad[1][1] - quad[0][1];
+  let deg = ((Math.atan2(vy, vx) * 180 / Math.PI) % 90 + 90) % 90;
+  return deg >= 45 ? deg - 90 : deg;
+}
+function dominantTilt(dets) {
+  let sn = 0, cs = 0;
+  for (const d of dets) {
+    const t4 = tiltDeg(d.quad) * 4 * Math.PI / 180;
+    sn += d.area * Math.sin(t4); cs += d.area * Math.cos(t4);
+  }
+  let deg = (Math.atan2(sn, cs) * 180 / Math.PI) / 4;
+  deg = ((deg % 90) + 90) % 90;
+  return deg >= 45 ? deg - 90 : deg;
+}
+
+/* Returns { img, tilt, n } or null (leave the frame whole) when the level crop
+   would reach past the real photo into the blank corners the rotation opens up.
+   `srcCanvas` holds the already colour-corrected full-resolution frame. */
+function alignMulti(srcCanvas, dets) {
+  if (!dets.length) return null;
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const angle = dominantTilt(dets), rad = angle * Math.PI / 180;
+  const a = Math.cos(rad), b = Math.sin(rad);            // getRotationMatrix2D, scale 1
+  const cx = w / 2, cy = h / 2;
+  let tx = (1 - a) * cx - b * cy, ty = b * cx + (1 - a) * cy;
+  const nw = Math.round(h * Math.abs(b) + w * Math.abs(a));
+  const nh = Math.round(h * Math.abs(a) + w * Math.abs(b));
+  tx += nw / 2 - cx; ty += nh / 2 - cy;
+  const map = (x, y) => [a * x + b * y + tx, -b * x + a * y + ty];
+
+  // rotate the whole frame into an expanded canvas (canvas matrix is [a c e; b d f])
+  const rc = document.createElement("canvas");
+  rc.width = nw; rc.height = nh;
+  const rctx = rc.getContext("2d", { willReadFrequently: true });
+  rctx.setTransform(a, -b, b, a, tx, ty);
+  rctx.drawImage(srcCanvas, 0, 0);
+  rctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const d of dets) for (const p of d.quad) {
+    const [X, Y] = map(p[0], p[1]);
+    if (X < x0) x0 = X; if (X > x1) x1 = X; if (Y < y0) y0 = Y; if (Y > y1) y1 = Y;
+  }
+  const mcx = (x0 + x1) / 2, mcy = (y0 + y1) / 2, ratio = w / h;
+  const hh = Math.max((y1 - y0) / 2, (x1 - x0) / 2 / ratio), hw = hh * ratio;
+  const cx0 = mcx - hw, cx1 = mcx + hw, cy0 = mcy - hh, cy1 = mcy + hh;
+
+  // would the crop reach past the photo's real footprint into blank fill?
+  const det = a * a + b * b, ia = a / det, ib = -b / det;
+  const itx = -(ia * tx - ib * ty), ity = -(ib * tx + ia * ty);
+  const invMap = (x, y) => [ia * x - ib * y + itx, ib * x + ia * y + ity];
+  const pad = 0.5;
+  for (const [px, py] of [[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]]) {
+    const [bx, by] = invMap(px, py);
+    if (bx < -pad || bx > w + pad || by < -pad || by > h + pad) return null;
+  }
+  const xi = Math.max(0, Math.round(cx0)), yi = Math.max(0, Math.round(cy0));
+  const xe = Math.min(nw, Math.round(cx1)), ye = Math.min(nh, Math.round(cy1));
+  if (xe - xi < 2 || ye - yi < 2) return null;
+  return { img: rctx.getImageData(xi, yi, xe - xi, ye - yi), tilt: angle, n: dets.length };
+}
+
 /* -------------------------------------------------------------- EXIF splice */
 /* Canvas drops EXIF entirely, so a phone-cleaned save loses the capture date
    that the Python side preserves. The browser has no API to write EXIF, so we
@@ -774,18 +869,39 @@ async function process(file) {
     }
     info.cropped = true;
   } else {
-    setStatus("more than one print — balancing only…");
+    setStatus("more than one print — balancing…");
     await nextFrame();
+    // colour-correct the whole frame, onto a canvas align() can rotate
+    const cc = document.createElement("canvas");
+    cc.width = full.width; cc.height = full.height;
+    const ccx = cc.getContext("2d", { willReadFrequently: true });
     const fd = fctx.getImageData(0, 0, full.width, full.height);
     for (let p = 0; p < fd.data.length; p += 4) {
       fd.data[p]     = lut[0][fd.data[p]];
       fd.data[p + 1] = lut[1][fd.data[p + 1]];
       fd.data[p + 2] = lut[2][fd.data[p + 2]];
     }
+    ccx.putImageData(fd, 0, 0);
     out = fd;
     info.cropped = false;
-    if (det.quad && det.blobs === 1 && det.aspect >= 1.40 && det.aspect <= 1.90)
+
+    // A near-miss (one roughly card-shaped blob failing the tight test) is a bad
+    // single-card fit worth a human look; anything else is an ordinary
+    // multi-print shot, so level and centre it around the prints.
+    const nearMiss = det.quad && det.blobs === 1 && det.aspect >= 1.40 && det.aspect <= 1.90;
+    if (nearMiss) {
       flags.push(`couldn't fit one card (aspect ${det.aspect.toFixed(2)}) — left uncropped`);
+    } else {
+      setStatus("levelling the prints…");
+      await nextFrame();
+      const detsFull = det.all.map(d => ({
+        quad: d.quad.map(p => [p[0] / s, p[1] / s]), area: d.area / (s * s) }));
+      const aligned = alignMulti(cc, detsFull);
+      if (aligned) {
+        out = aligned.img;
+        info.aligned = true; info.tilt = aligned.tilt; info.n = aligned.n;
+      }
+    }
   }
 
   return { out, flags, info, m0, gain };
@@ -797,7 +913,9 @@ function report(res) {
   fl.innerHTML = "";
   if (!res.flags.length) {
     fl.innerHTML = `<div class="flag ok"><b>✓</b><span>${res.info.cropped
-      ? "cropped, straightened and turned upright" : "balanced (multiple prints, left whole)"}</span></div>`;
+      ? "cropped, straightened and turned upright"
+      : res.info.aligned ? "balanced and levelled — rotate if it isn't upright"
+      : "balanced (multiple prints, left whole)"}</span></div>`;
   } else {
     for (const f of res.flags)
       fl.innerHTML += `<div class="flag"><b>!</b><span>${f}</span></div>`;
@@ -815,6 +933,7 @@ function report(res) {
     rows.push(["output", `${OUT_W} × ${OUT_H}`]);
   } else {
     rows.push(["prints seen", String(res.info.blobs)]);
+    if (res.info.aligned) rows.push(["levelled", `${res.info.tilt.toFixed(1)}° · ${res.info.n} region${res.info.n > 1 ? "s" : ""}`]);
   }
   $("stats").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
   $("stage").classList.add("on");
@@ -840,13 +959,19 @@ $("pick").addEventListener("change", async e => {
   e.target.value = "";
 });
 
-$("rotate").addEventListener("click", () => {
+function applyRotation(fn) {
   if (!resultCanvas) return;
   const ctx = resultCanvas.getContext("2d");
-  const img = rotate180(ctx.getImageData(0, 0, resultCanvas.width, resultCanvas.height));
-  ctx.putImageData(img, 0, 0);
+  const img = fn(ctx.getImageData(0, 0, resultCanvas.width, resultCanvas.height));
+  // a quarter turn swaps dimensions, so resize the canvas before writing back
+  resultCanvas.width = img.width; resultCanvas.height = img.height;
+  resultCanvas.getContext("2d").putImageData(img, 0, 0);
   drawTo($("after"), img);
-});
+  setStatus("rotated — " + img.width + " × " + img.height);
+}
+$("rotL").addEventListener("click", () => applyRotation(img => rotate90(img, false)));
+$("rotR").addEventListener("click", () => applyRotation(img => rotate90(img, true)));
+$("rot180").addEventListener("click", () => applyRotation(rotate180));
 
 $("save").addEventListener("click", () => {
   if (!resultCanvas) return;
