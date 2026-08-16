@@ -18,6 +18,7 @@ checleaner/
   docs/PIPELINE.md       the algorithm, why each step is the way it is
   docs/HISTORY.md        every batch processed, with before/after measurements
   tools/detect.py        fast detection-only preview for named files (no colour pass)
+  tests/test_pipeline.py regression tests: colour targets, aspect, orientation, single-vs-multi
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
     <other>/               ad hoc structure for a specific shoot, e.g. rancheki,
@@ -62,10 +63,18 @@ landed); `review/report.txt` lists just the flagged files and why, next to the
 photos themselves — meant to be readable without watching console output,
 which matters when a run is driven by an agent rather than a terminal.
 
+`tests/test_pipeline.py` pins the numbers for `checleaner.py`: colour targets
+(white 238.8, black 2.2), single-card aspect, the orientation flip, and the
+single-vs-multi decision. Fixtures are synthetic and generated in-process — the
+real photos are personal and gitignored — with an opt-in tier that also asserts
+on `chekis/main/` when it's present and skips otherwise. Run it standalone
+(`python3 tests/test_pipeline.py`, needs only checleaner's own deps) or under
+`pytest tests/`. Run it after any change to the maths, not just the geometry.
+
 The phone app is opened directly in a browser; there is no build step. To test it
 headlessly, drive it with Playwright: load `file://.../checleaner.html`, `setInputFiles`
 on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
-`#stats`. There is no assertion harness yet — see Next steps.
+`#stats`. There is no assertion harness for it yet — see Next steps.
 
 ## Invariants — do not change casually
 
@@ -92,9 +101,12 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
 
 ## Next steps, roughly in order of value
 
-1. **A regression test.** Both implementations are checked by hand right now.
-   A fixture folder plus asserted white/black/aspect/orientation numbers would
-   make any future change safe. The numbers to assert are in `docs/HISTORY.md`.
+1. **Extend the regression tests to `checleaner.html`.** `checleaner.py` is now
+   covered by `tests/test_pipeline.py` (synthetic fixtures asserting colour
+   targets, aspect, orientation, single-vs-multi). The phone app is still checked
+   by hand — port the same asserted numbers to a Playwright-driven check so both
+   implementations are safe to change. Optionally, add real-photo golden numbers
+   from `docs/HISTORY.md` to the opt-in tier.
 2. **Port multi-print alignment (`align_multi()`, see `docs/PIPELINE.md` § 6)
    to `checleaner.html`.** `checleaner.py` now rotates and centres a multi-print
    photo when it can; the phone app still just balances and leaves it whole.
