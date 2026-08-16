@@ -39,14 +39,22 @@ python3 checleaner.py chekis/main/ --dry-run  # measure and report, write nothin
 python3 checleaner.py chekis/main/ --force    # reprocess everything, not just new files
 ```
 
-~3 s per photo for the (cheap) measurement pass, ~10 s more for any file actually
-reprocessed. A file already in `balanced/` or `review/` is skipped by default and
-its prior `report.csv` row reused — the pipeline is deterministic, so redoing it
-would produce byte-identical output. This is why folders don't need separate
-pending/done directories: just drop new photos in and rerun: only the new ones
-(or a file present in *neither* or, if something went wrong, present in *both*
-output dirs) get the expensive full-resolution pass. Pass `--force` after a code
-or calibration change, so every file benefits rather than just new ones.
+A file already in `balanced/` or `review/` is skipped by default — its prior
+`report.csv` row (kind, flags, geometry stats) is reused, and its measurement
+(white/black/gain/desk) is read back from `report.csv` rather than recomputed —
+the pipeline is deterministic, so redoing either would produce byte-identical
+output. This is why folders don't need separate pending/done directories: just
+drop new photos in and rerun; only the new ones (or a file present in *neither*
+output dir, or — if something went wrong — present in *both*) get measured or
+reprocessed. On a folder of 66 where only one file changed, that is the
+difference between "measuring 1 of 66 images (65 unchanged, reusing prior
+measurements)" and redoing the ~3 s/photo measurement pass for all 66; the
+~10 s/file crop-and-colour pass was always this selective. Pass `--force`
+after a code or calibration change, so every file benefits rather than just
+new ones — it ignores `report.csv` entirely and remeasures + reprocesses from
+scratch. (An older `report.csv` written before this caching existed has no
+`desk` column; the next non-`--force` run measures every file once more to
+backfill it, then caches normally from there.)
 
 When you're iterating on *detection* geometry (which blob is a card, its aspect,
 which way up, one print vs several) rather than colour, don't rerun the batch —

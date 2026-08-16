@@ -31,6 +31,7 @@ Requires: numpy, opencv-python, pillow, scipy, piexif
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import os
 import sys
@@ -736,6 +737,30 @@ class Result:
     stats: dict = field(default_factory=dict)
 
 
+def _cached_measurement(row):
+    """Parse a prior report.csv row into the five things pass 1 would otherwise
+    recompute (white_before, black_before, gain, clipped_pct, desk), or None if
+    the row can't supply all of them.
+
+    A missing "desk" *column* (an older report.csv, from before it was tracked)
+    is treated the same as unusable -- not just a missing/blank field -- since
+    that absence can't be told apart from "no desk was detected", and guessing
+    wrong would silently drop a file from the desk median.
+    """
+    if row is None or "desk" not in row:
+        return None
+    try:
+        white_before = ast.literal_eval(row["white_before"])
+        black_before = ast.literal_eval(row["black_before"])
+        gain = np.array(ast.literal_eval(row["gain"]), dtype=np.float64)
+        clipped_pct = float(row["clipped_pct"])
+    except (ValueError, SyntaxError, TypeError, KeyError):
+        return None
+    desk_cell = row["desk"]
+    desk = np.array(ast.literal_eval(desk_cell), dtype=np.float64) if desk_cell else None
+    return white_before, black_before, gain, clipped_pct, desk
+
+
 def run(args) -> int:
     src = args.folder
     files = sorted(f for f in os.listdir(src)
@@ -747,60 +772,17 @@ def run(args) -> int:
     white_t = np.full(3, float(to_linear(np.array([args.white]))[0]))
     black_t = np.full(3, float(to_linear(np.array([args.black]))[0]))
 
-    # -- pass 1: measure and solve every image ------------------------------
-    print(f"measuring {len(files)} images", flush=True)
-    solved, results = {}, {}
-    for name in files:
-        path = os.path.join(src, name)
-        thumb = Image.open(path)
-        thumb.thumbnail((1400, 1400))
-        rgb = np.asarray(thumb.convert("RGB")).astype(np.float32)
-        m = measure(rgb)
-        gain, off = solve_levels(rgb, m, white_t, black_t)
-
-        corrected = to_srgb(soft_shoulder(np.clip(to_linear(rgb) * gain + off, 0, None)))
-        after = measure(corrected)
-        solved[name] = (gain, off, after.desk)
-
-        r = Result(name)
-        r.stats = dict(
-            white_before=np.round(to_srgb(m.white), 1).tolist(),
-            black_before=np.round(to_srgb(m.black), 2).tolist(),
-            gain=np.round(gain, 3).tolist(),
-            clipped_pct=round(m.white_clipped * 100, 1),
-        )
-        if m.white_clipped > 0.15:
-            r.flags.append(f"white reference {m.white_clipped*100:.0f}% clipped")
-        if gain.max() > args.max_gain or gain.min() < 1 / args.max_gain:
-            r.flags.append(f"extreme correction (gain {np.round(gain,2).tolist()})")
-        results[name] = r
-
-    # -- folder-wide desk target -------------------------------------------
-    desks = [d for (_, _, d) in solved.values() if d is not None]
-    target_u = None
-    if desks and args.desk_strength > 0:
-        target_u = np.median([np.clip((d - black_t) / (white_t - black_t), 1e-4, 0.999)
-                              for d in desks], axis=0)
-        print(f"desk target {np.round(to_srgb(black_t + target_u*(white_t-black_t)),1).tolist()}"
-              f" from {len(desks)} images", flush=True)
-
-    if args.dry_run:
-        for name in files:
-            r = results[name]
-            print(f"  {name}  gain={r.stats['gain']}  {'; '.join(r.flags) or 'ok'}")
-        return 0
-
     out_root = args.out or src
     good_dir = os.path.join(out_root, "balanced")
     review_dir = os.path.join(out_root, "review")
-    os.makedirs(good_dir, exist_ok=True)
-    os.makedirs(review_dir, exist_ok=True)
 
     # A file already sitting in balanced/ or review/ produces the identical
     # output if reprocessed -- the pipeline is deterministic -- so redoing it
-    # is pure waste. Skip by default and reuse the prior report.csv row for
-    # its pass-2 stats/flags; --force to reprocess everything regardless
-    # (e.g. after an algorithm change that should benefit every file).
+    # is pure waste. Computed up front (existence checks only, no directories
+    # created yet) so pass 1 can skip *measuring* these too, not just pass 2's
+    # crop/colour work -- reusing their prior white/black/gain/desk numbers
+    # from report.csv instead. --force ignores all of this and treats every
+    # file as new.
     prior = {} if args.force else _read_prior_report(os.path.join(out_root, "report.csv"))
     already_done = {}
     for name in files:
@@ -814,6 +796,73 @@ def run(args) -> int:
         # before a file got reclassified) -- either way, not cleanly
         # resolved, so fall through and reprocess it. A duplicate gets
         # cleaned up as a side effect of the stale-copy removal below.
+
+    cached = {} if args.force else {
+        name: c for name in files if name in already_done
+        for c in [_cached_measurement(prior.get(name))] if c is not None
+    }
+
+    # -- pass 1: measure and solve every image not read from cache ----------
+    if cached:
+        print(f"measuring {len(files) - len(cached)} of {len(files)} images "
+              f"({len(cached)} unchanged, reusing prior measurements)", flush=True)
+    else:
+        print(f"measuring {len(files)} images", flush=True)
+    solved, results, desks = {}, {}, []
+    for name in files:
+        r = Result(name)
+        if name in cached:
+            white_before, black_before, gain, clipped_pct, desk = cached[name]
+            r.stats = dict(white_before=white_before, black_before=black_before,
+                            gain=gain.tolist(), clipped_pct=clipped_pct,
+                            desk=desk.tolist() if desk is not None else None)
+            results[name] = r
+            if desk is not None:
+                desks.append(desk)
+            continue
+
+        path = os.path.join(src, name)
+        thumb = Image.open(path)
+        thumb.thumbnail((1400, 1400))
+        rgb = np.asarray(thumb.convert("RGB")).astype(np.float32)
+        m = measure(rgb)
+        gain, off = solve_levels(rgb, m, white_t, black_t)
+
+        corrected = to_srgb(soft_shoulder(np.clip(to_linear(rgb) * gain + off, 0, None)))
+        after = measure(corrected)
+        solved[name] = (gain, off, after.desk)
+        if after.desk is not None:
+            desks.append(after.desk)
+
+        r.stats = dict(
+            white_before=np.round(to_srgb(m.white), 1).tolist(),
+            black_before=np.round(to_srgb(m.black), 2).tolist(),
+            gain=np.round(gain, 3).tolist(),
+            clipped_pct=round(m.white_clipped * 100, 1),
+            desk=np.round(after.desk, 6).tolist() if after.desk is not None else None,
+        )
+        if m.white_clipped > 0.15:
+            r.flags.append(f"white reference {m.white_clipped*100:.0f}% clipped")
+        if gain.max() > args.max_gain or gain.min() < 1 / args.max_gain:
+            r.flags.append(f"extreme correction (gain {np.round(gain,2).tolist()})")
+        results[name] = r
+
+    # -- folder-wide desk target -------------------------------------------
+    target_u = None
+    if desks and args.desk_strength > 0:
+        target_u = np.median([np.clip((d - black_t) / (white_t - black_t), 1e-4, 0.999)
+                              for d in desks], axis=0)
+        print(f"desk target {np.round(to_srgb(black_t + target_u*(white_t-black_t)),1).tolist()}"
+              f" from {len(desks)} images", flush=True)
+
+    if args.dry_run:
+        for name in files:
+            r = results[name]
+            print(f"  {name}  gain={r.stats['gain']}  {'; '.join(r.flags) or 'ok'}")
+        return 0
+
+    os.makedirs(good_dir, exist_ok=True)
+    os.makedirs(review_dir, exist_ok=True)
     n_skipped = 0
 
     # -- pass 2: apply, crop, orient ---------------------------------------
@@ -963,8 +1012,11 @@ def _write_report(path, files, results):
         wr = csv.writer(fh)
         # dest is derived (review iff flags), not tracked separately, so it can
         # never drift out of sync with where the file actually landed
+        # desk is here for reuse, not just record-keeping: a rerun reads it back
+        # (see _cached_measurement) to skip re-measuring an unchanged file, so
+        # it must stay in lockstep with white_before/black_before/gain/clipped_pct
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
-                     "clipped_pct", "aspect", "fill", "border_ratio",
+                     "clipped_pct", "desk", "aspect", "fill", "border_ratio",
                      "align_tilt", "align_n", "align_crop", "reorient",
                      "windows", "flags"])
         for name in files:
@@ -972,7 +1024,7 @@ def _write_report(path, files, results):
             s = r.stats
             dest = "review" if r.flags else "balanced"
             wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
-                         s.get("gain"), s.get("clipped_pct"), s.get("aspect"),
+                         s.get("gain"), s.get("clipped_pct"), s.get("desk"), s.get("aspect"),
                          s.get("fill"), s.get("border_ratio"),
                          s.get("align_tilt"), s.get("align_n"), s.get("align_crop"),
                          s.get("reorient"), s.get("windows"),

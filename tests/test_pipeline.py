@@ -28,10 +28,14 @@ import cv2
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+import io
+import contextlib
+
 import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
                         detect_print, detect_all_prints, align_multi, warp, orient,
-                        build_parser, content_rotation, count_windows, ASPECT)
+                        build_parser, content_rotation, count_windows,
+                        _cached_measurement, run, ASPECT)
 from tools.detect import classify   # the single/single?/multi gate, one copy
 
 
@@ -424,6 +428,81 @@ def test_real_multiprint_reorientation():
         assert got == 0, f"{name}: already upright but reorient turned it {got*90}"
     if checked == 0:
         skip("none of the reorientation reference photos are present")
+
+
+# ---------------------------------------------------- pass-1 measurement cache
+
+def test_cached_measurement_round_trips_and_rejects_bad_rows():
+    """_cached_measurement() is what lets an unchanged file skip pass 1's
+    measure+solve, so it must parse a real row back out exactly, treat a
+    missing desk *column* (an older report.csv) as unusable rather than
+    guessing, and fall back to None -- not raise -- on anything malformed."""
+    good = {"white_before": "[229.0, 229.0, 228.0]", "black_before": "[3.1, 2.8, 2.6]",
+            "gain": "[1.234, 0.987, 1.056]", "clipped_pct": "0.0",
+            "desk": "[0.0622, 0.0263, 0.0139]"}
+    out = _cached_measurement(good)
+    assert out is not None
+    white_before, black_before, gain, clipped_pct, desk = out
+    assert white_before == [229.0, 229.0, 228.0]
+    assert np.allclose(gain, [1.234, 0.987, 1.056])
+    assert clipped_pct == 0.0
+    assert np.allclose(desk, [0.0622, 0.0263, 0.0139])
+
+    no_desk = dict(good, desk="")
+    _, _, _, _, desk = _cached_measurement(no_desk)
+    assert desk is None, "an explicitly empty desk cell means 'no desk detected', not unusable"
+
+    missing_column = {k: v for k, v in good.items() if k != "desk"}
+    assert _cached_measurement(missing_column) is None, \
+        "a report.csv from before the desk column existed must not be trusted"
+
+    corrupt = dict(good, gain="not a list")
+    assert _cached_measurement(corrupt) is None
+
+    assert _cached_measurement(None) is None
+
+
+def test_rerun_skips_measuring_unchanged_files():
+    """The end-to-end behaviour this was built for: replace one input, delete
+    its output, rerun -- only that one file should be measured, and the desk
+    target computed from the mix of fresh + cached measurements must match a
+    run that measured everything fresh."""
+    with tempfile.TemporaryDirectory() as tmp:
+        names = [f"single_{i}.jpg" for i in range(3)]
+        for i, name in enumerate(names):
+            cv2.imwrite(os.path.join(tmp, name), cv2.cvtColor(make_single(seed=i * 10), cv2.COLOR_RGB2BGR))
+
+        args = build_parser().parse_args([tmp])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert run(args) == 0
+        header = open(os.path.join(tmp, "report.csv")).readline()
+        assert "desk" in header.split(","), f"report.csv header missing desk column: {header!r}"
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert run(args) == 0
+        out = buf.getvalue()
+        assert "measuring 0 of 3 images (3 unchanged, reusing prior measurements)" in out, out
+
+        # wherever run() put it (balanced/ or review/ -- not the point of this test)
+        made = [d for d in ("balanced", "review") if os.path.exists(os.path.join(tmp, d, names[0]))]
+        assert made, f"{names[0]} landed in neither balanced/ nor review/"
+        os.remove(os.path.join(tmp, made[0], names[0]))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert run(args) == 0
+        out = buf.getvalue()
+        assert "measuring 1 of 3 images (2 unchanged, reusing prior measurements)" in out, out
+        assert os.path.exists(os.path.join(tmp, made[0], names[0])), \
+            "the deleted output should have been regenerated in the same place"
+
+        # --force must ignore the cache regardless of what's on disk
+        force_args = build_parser().parse_args([tmp, "--force"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert run(force_args) == 0
+        assert "measuring 3 images" in buf.getvalue()
 
 
 if __name__ == "__main__":

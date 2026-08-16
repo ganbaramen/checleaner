@@ -506,6 +506,34 @@ implied shift is small. After a --force rerun the worst top/bottom gap fell from
 (023359428 stayed 0/0). New opt-in test asserts balanced margins on the three
 worst former offenders.
 
+## Pass 1 caches measurements, so an unchanged file isn't remeasured (2026-08-16)
+
+Reported directly: replacing one input and deleting its output still printed
+"measuring 66 images" and took over a minute. The skip logic (§ Running in
+CLAUDE.md) only ever covered pass 2 -- the expensive crop/colour rewrite --
+because pass 1 exists to build the *folder-wide* desk target, which every file
+including unchanged ones was re-measured to feed.
+
+Fixed by writing each file's measurement (white_before, black_before, gain,
+desk) to a new `desk` column in `report.csv`, and reading it back on the next
+run for any file whose output already exists: `_cached_measurement()` parses
+the row, and a file only takes the cheap path if all four fields (plus the
+`desk` column itself, to tell "no desk" apart from "written before this
+existed") parse cleanly -- any corruption or missing column falls back to a
+fresh measurement for just that file, never a crash.
+
+Verified on `chekis/main/` (66 files): first run after the change re-measured
+all 66 once (backfilling `desk`, the column didn't exist yet) in ~85s; the very
+next run, nothing changed, printed "measuring 0 of 66 images (66 unchanged,
+reusing prior measurements)" and finished in 0.4s, with an *identical* desk
+target ([65.6, 42.3, 29.7] both times). Deleting one output reproduced the
+original complaint exactly, now fixed: "measuring 1 of 66 images (65 unchanged,
+...)" in ~4.5s. `--force` and `--dry-run` both still behave as before --
+`--force` ignores the cache entirely, `--dry-run` benefits from it but still
+writes nothing. A duplicate output (present in both `balanced/` and `review/`,
+the existing "something went wrong" signal) still forces a fresh remeasure, not
+just a fresh reprocess, since it isn't eligible for the cache either.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
