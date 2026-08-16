@@ -31,7 +31,7 @@ sys.path.insert(0, REPO)
 import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
                         detect_print, detect_all_prints, align_multi, warp, orient,
-                        build_parser, content_rotation, ASPECT)
+                        build_parser, content_rotation, count_windows, ASPECT)
 from tools.detect import classify   # the single/single?/multi gate, one copy
 
 
@@ -226,6 +226,22 @@ def test_align_crop_picks_best_fit_aspect():
         os.remove(p)
 
 
+def test_window_count_tells_one_print_from_several():
+    """count_windows counts the enclosed picture-holes in the paper blob: one
+    per print. A single card measures 1; a row of two touching prints keeps two
+    separate windows even though their borders merge into one blob."""
+    p = _write(make_single())
+    try:
+        assert count_windows(p) == 1, "single card should enclose one window"
+    finally:
+        os.remove(p)
+    p = _write(make_row(cols=2))
+    try:
+        assert count_windows(p) == 2, "row of two should enclose two windows"
+    finally:
+        os.remove(p)
+
+
 def test_grid_is_rejected_by_solidity_not_aspect():
     """A 2x2 grid lands inside the single-card aspect+fill window yet is only one
     blob -- solidity is the sole discriminator, so verify it is what rejects it."""
@@ -275,6 +291,32 @@ def test_real_grid_photo_fails_solidity():
         skip("grid reference photo not present")
     d = detect_print(path)
     assert d.solidity < DEFAULTS.min_solidity, f"real grid solidity {d.solidity:.3f} no longer caught"
+
+
+def test_real_window_counts_split_near_misses_from_singles():
+    """The --multi-windows threshold (7) sits between the busiest genuine
+    single (6 window fragments) and the merged multi-print blobs (7-18). These
+    are the anchor files on each side of that line."""
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    thresh = DEFAULTS.multi_windows
+    checked = 0
+    for name, side in [("PXL_20260427_023126095.MP.jpg", "multi"),   # 6 prints, 10 windows
+                       ("PXL_20260427_023727013.MP.jpg", "multi"),   # 4 prints, 10 windows
+                       ("PXL_20260427_023820588.MP.jpg", "single"),  # busiest genuine single: 6
+                       ("PXL_20260427_023252712.MP.jpg", "single")]:
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        wins = count_windows(path)
+        if side == "multi":
+            assert wins >= thresh, f"{name}: {wins} windows, expected >= {thresh}"
+        else:
+            assert wins < thresh, f"{name}: {wins} windows, expected < {thresh}"
+    if checked == 0:
+        skip("none of the window-count reference photos are present")
 
 
 # Multi-print photos that align_multi levels but leaves mis-turned, with the

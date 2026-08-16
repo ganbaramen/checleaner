@@ -292,6 +292,42 @@ def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
     return [d for d in dets if d is not None]
 
 
+def count_windows(path: str, size: int = 1400) -> int | None:
+    """How many photo windows the largest paper blob encloses.
+
+    Disambiguates a near-miss: prints that overlap merge into one blob whose
+    shape statistics can beat a genuine card's (white border on white border
+    leaves no seam for fill or solidity to catch), but each print's *picture*
+    stays dark and separate -- a hole in the paper mask. One card has one
+    window, fragmented at most into a few pieces where bright content (a white
+    blouse, a pale wall) bridges it to the border; across the whole library the
+    worst genuine single measured 6 fragments, while merged multi-print blobs
+    run 7-18. So a high count is proof of several prints, while a low count
+    proves nothing -- which is why the caller treats only the high side as
+    evidence.
+
+    The flood fill seeds from a padded border, not the bbox corner: the corner
+    of a tilted blob's bbox can be *inside* the blob, and seeding there marks
+    the wrong region as exterior (cost a real debugging session in the
+    abandoned split_prints work this is salvaged from).
+    """
+    seg = _segment_prints(path, size)
+    if seg is None or not seg["big"]:
+        return None
+    idx = max(seg["big"], key=lambda i: seg["stats"][i, cv2.CC_STAT_AREA])
+    comp = (seg["labels"] == idx).astype(np.uint8)
+    ys, xs = np.where(comp)
+    sub = comp[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+    notpaper = np.pad((1 - sub).astype(np.uint8), 1, constant_values=1)
+    ffmask = np.zeros((notpaper.shape[0] + 2, notpaper.shape[1] + 2), np.uint8)
+    filled = notpaper.copy()
+    cv2.floodFill(filled, ffmask, (0, 0), 2)
+    holes = (((notpaper == 1) & (filled != 2))[1:-1, 1:-1]).astype(np.uint8) * 255
+    n, _, stats, _ = cv2.connectedComponentsWithStats(holes, 8)
+    return sum(1 for i in range(1, n)
+               if stats[i, 4] > 0.005 * sub.shape[0] * sub.shape[1])
+
+
 def _tilt_deg(quad: np.ndarray) -> float:
     """A blob's tilt from axis-aligned, folded into [-45, 45).
 
@@ -749,7 +785,7 @@ def run(args) -> int:
                     if flag and flag not in r.flags:
                         r.flags.append(flag)
                 for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n",
-                          "align_crop", "reorient"):
+                          "align_crop", "reorient", "windows"):
                     v = old.get(k)
                     if v not in (None, ""):
                         r.stats[k] = v
@@ -797,6 +833,16 @@ def run(args) -> int:
                 r.kind = "multi"
                 near_miss = (det.quad is not None and det.n_blobs == 1
                              and 1.40 <= det.aspect <= 1.90)
+                if near_miss:
+                    # a card-shaped blob enclosing many photo windows can't be
+                    # one card -- overrule the near-miss and treat it as the
+                    # merged multi-print shot it is. Only the high side counts:
+                    # a low count proves nothing (see count_windows).
+                    wins = count_windows(path)
+                    if wins is not None:
+                        r.stats["windows"] = wins
+                        if wins >= args.multi_windows:
+                            near_miss = False
                 # align_multi only levels; the content turn (a quarter or half
                 # turn so the frame isn't left sideways) is decided *first* and
                 # folded into the alignment warp, because the crop shape is
@@ -871,7 +917,8 @@ def _write_report(path, files, results):
         # never drift out of sync with where the file actually landed
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
                      "clipped_pct", "aspect", "fill", "border_ratio",
-                     "align_tilt", "align_n", "align_crop", "reorient", "flags"])
+                     "align_tilt", "align_n", "align_crop", "reorient",
+                     "windows", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
@@ -880,7 +927,7 @@ def _write_report(path, files, results):
                          s.get("gain"), s.get("clipped_pct"), s.get("aspect"),
                          s.get("fill"), s.get("border_ratio"),
                          s.get("align_tilt"), s.get("align_n"), s.get("align_crop"),
-                         s.get("reorient"),
+                         s.get("reorient"), s.get("windows"),
                          "; ".join(r.flags)])
 
 
@@ -987,6 +1034,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="reject blobs whose raw mask has notches the hull "
                         "smooths over -- catches a tight card grid that "
                         "coincidentally fits the single-card aspect/fill window")
+    p.add_argument("--multi-windows", type=int, default=7,
+                   help="a near-miss blob enclosing at least this many photo "
+                        "windows is treated as several merged prints, not a "
+                        "suspect single card (worst genuine single measured 6)")
     p.add_argument("--min-border-ratio", type=float, default=1.6,
                    help="flag orientation when the two end borders look this alike "
                         "(a real instax mini measures ~2.1)")

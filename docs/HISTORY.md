@@ -448,6 +448,33 @@ Sweep of all 15 aligned files in `chekis/main/`: 8 chose 4:3, 5 chose 1:1
 poked outside -- one at frame ratio 0.753, a hair off 3:4's 0.750, which is the
 fallback working at the margin, not a bug). None declined that aligned before.
 
+## Overlapping prints cleared from review by counting photo windows (2026-08-16)
+
+Two files the user called "easily croppable" were stuck in review as `single?`
+near-misses: overlapped prints merge into one blob whose shape stats can beat a
+genuine card's (023727013, a 4-print row: fill 0.988, solidity 0.991 -- white
+border on white border leaves no seam to catch; 023126095's two-row layout even
+lands aspect 1.545, inside the single-card window). Shape alone cannot tell
+these from a badly-fit single card, which is exactly what the near-miss gate
+exists to catch.
+
+The pictures can: each print's photo area stays a separate enclosed hole in the
+paper mask. `count_windows()` (salvaged from the abandoned split_prints work)
+counts them. Sweep of all 66 files: genuine singles measure 1-6 (the high ones
+are windows fragmented by bright content bridging to the border), merged
+multi-print blobs 7-18, with the two complaint files at 10 each. Threshold
+`--multi-windows 7` -- one above the worst genuine single. Boundary files at
+5-8 windows were eyeballed: all genuinely multi, so the ones under threshold
+merely stay in review (safe direction; a missed flip costs one review, a wrong
+flip would skip review for a card that needed hand-cropping).
+
+Result of the --force rerun: of the 14 former `single?` files, the 10 with >= 7
+windows went down the align path (levelled, best-fit-cropped, reoriented) and
+the 4 with fewer stayed `single?`. Seven of the ten moved out of review into
+balanced; the other three reclassified but kept a *different* flag (blown white
+reference, mostly) so stayed in review on their own merit. Net: balanced
+40 -> 47, review 26 -> 19.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
