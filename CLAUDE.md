@@ -64,17 +64,11 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
 
 ## Next steps, roughly in order of value
 
-1. **Port the paper-frame detector from `checleaner.html` back to `checleaner.py`.**
-   The JS finds the card by its white border rather than by "not desk", and is
-   measurably better: aspects land 1.579–1.611 against the Python's 1.54–1.62 on
-   the same 11 photos. This is the single biggest known win.
-2. **A regression test.** Both implementations are checked by hand right now.
+1. **A regression test.** Both implementations are checked by hand right now.
    A fixture folder plus asserted white/black/aspect/orientation numbers would
    make any future change safe. The numbers to assert are in `docs/HISTORY.md`.
-3. **Split multi-print photos into separate crops.** Currently they are balanced
+2. **Split multi-print photos into separate crops.** Currently they are balanced
    and left whole. The detector already counts blobs; the work is handling prints
    that touch and merge into one blob.
-4. **EXIF on the phone app.** Canvas drops it, so phone-cleaned files lose the
-   capture date that the Python preserves. Needs manual JPEG segment splicing.
-5. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
+3. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
    available in the Android share sheet. A `file://` page can be neither.

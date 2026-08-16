@@ -72,23 +72,20 @@ are genuinely different wood will never match — see the pine vs walnut case in
 
 ## 3. Detect the print
 
-Two implementations, and **the newer one is better**.
+Both implementations find the card by its **white paper frame**: bright *and*
+near-neutral, `L > 0.62 × p99(L)` and chroma < 16 (CIELAB). Close with r=21 to
+bridge the photo window, open with r=8 to shed highlights, take the largest
+connected component, convex hull, `minAreaRect`.
 
-**`checleaner.py` — "everything that isn't desk".** Model the desk in CIELAB from
-a ring around the frame border (safe: the print is never at the very edge), mask
-pixels more than 5 normalised units away, close 15×15, open 9×9, take the largest
-connected component, `minAreaRect`. Works on ~90% of fronts.
-
-**`checleaner.html` — "find the white paper frame".** Bright *and* near-neutral:
-`L > 0.62 × p99(L)` and chroma < 16. Close with r=21 to bridge the photo window,
-open with r=8 to shed highlights.
-
-The second is better because a print's dark photo area is often as dark and as
-warm as walnut, so the "not desk" mask comes out as a hollow frame and any bright
-patch of desk merges into it. On the same 11 photos: aspects 1.579–1.611 (paper
-frame) against 1.54–1.62 (not desk), and one photo the not-desk mask fitted at
-1.43. The paper border is the more distinctive feature — bright and neutral is
-something desk never is. **Porting this back to Python is task 1 in CLAUDE.md.**
+An earlier Python version instead segmented "everything that isn't desk" —
+modelling the desk in CIELAB from a ring around the frame border and masking
+pixels more than 5 normalised units away. It looked reasonable but was worse: a
+print's dark photo area is often as dark and as warm as walnut, so that mask
+came out as a hollow frame with any bright patch of desk merged into it. On the
+same 11 photos the paper-frame method lands aspects at 1.568–1.611 against the
+old method's 1.54–1.62 (and one photo the old mask fitted at 1.43). The paper
+border is the more distinctive feature — bright and neutral is something desk
+never is.
 
 Accept the fit only if: exactly one large blob, aspect ∈ [1.53, 1.65], and fill
 ≥ 0.93. Fill is measured on the convex hull, so a frame with an unfilled middle

@@ -184,10 +184,15 @@ class Detection:
 
 
 def detect_print(path: str, size: int = 1100) -> Detection:
-    """Find a single print by segmenting everything that isn't desk.
+    """Find a single print by its white paper frame: bright *and* near-neutral.
 
-    The desk colour is modelled from a ring around the frame edge, which is
-    reliable because the print is never at the very border of these photos.
+    Ported from checleaner.html, which finds this more reliably than the
+    "everything that isn't desk" approach tried first: a print's dark photo
+    area is often as dark and as warm as walnut, so that mask comes out as a
+    hollow frame and any bright patch of desk merges into it. Bright-and-
+    neutral is the more distinctive feature -- desk is never both. On the
+    same 11 photos this landed aspects at 1.568-1.611 against the old
+    method's 1.54-1.62; see docs/PIPELINE.md.
     """
     img = cv2.imread(path)
     if img is None:
@@ -196,19 +201,15 @@ def detect_print(path: str, size: int = 1100) -> Detection:
     sc = size / max(h, w)
     small = cv2.resize(img, (int(w * sc), int(h * sc)), interpolation=cv2.INTER_AREA)
     lab = cv2.cvtColor(cv2.GaussianBlur(small, (7, 7), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    L, A, B = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
+    H, W = L.shape
 
-    H, W = lab.shape[:2]
-    m = int(0.035 * max(H, W))
-    ring = np.zeros((H, W), bool)
-    ring[:m, :] = ring[-m:, :] = True
-    ring[:, :m] = ring[:, -m:] = True
-    mu = np.median(lab[ring], axis=0)
-    sd = np.maximum(lab[ring].std(axis=0), 2.5)
-    dist = np.sqrt((((lab - mu) / sd) ** 2).sum(axis=2))
-
-    mask = cv2.morphologyEx((dist > 5).astype(np.uint8) * 255, cv2.MORPH_CLOSE,
-                            np.ones((15, 15), np.uint8), iterations=3)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8), iterations=2)
+    hi = np.percentile(L, 99)
+    chroma = np.hypot(A - 128, B - 128)
+    mask = ((L > 0.62 * hi) & (chroma < 16)).astype(np.uint8) * 255
+    # close wide enough to bridge the photo window, then open to shed highlights
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((43, 43), np.uint8))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((17, 17), np.uint8))
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     big = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] > 0.03 * H * W]
@@ -216,11 +217,11 @@ def detect_print(path: str, size: int = 1100) -> Detection:
         return Detection(n_blobs=0, reason="no print found")
 
     idx = max(big, key=lambda i: stats[i, cv2.CC_STAT_AREA])
-    comp = cv2.morphologyEx((labels == idx).astype(np.uint8), cv2.MORPH_CLOSE,
-                            np.ones((41, 41), np.uint8))
+    comp = (labels == idx).astype(np.uint8)
     contour = max(cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0],
                   key=cv2.contourArea)
-    rect = cv2.minAreaRect(contour)
+    hull = cv2.convexHull(contour)
+    rect = cv2.minAreaRect(hull)
     (rw, rh) = rect[1]
     if min(rw, rh) < 1:
         return Detection(n_blobs=len(big), reason="degenerate fit")
@@ -234,7 +235,8 @@ def detect_print(path: str, size: int = 1100) -> Detection:
     return Detection(
         quad=box / sc,
         aspect=(edges[0] + edges[2]) / (edges[1] + edges[3]),
-        fill=cv2.contourArea(contour) / (rw * rh),
+        # fill measured on the hull, so a frame with an unfilled middle still scores ~1
+        fill=cv2.contourArea(hull) / (rw * rh),
         n_blobs=len(big),
     )
 

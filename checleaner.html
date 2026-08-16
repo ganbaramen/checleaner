@@ -87,6 +87,7 @@
   Whites and blacks are pulled to fixed targets (238.8 / 2.2), the same ones used on the
   desktop batches — so anything cleaned here matches that library. Single prints get cropped
   to true instax proportions; if the photo holds more than one print it is balanced and left whole.
+  The saved file keeps the original photo's capture date and other EXIF data.
   Everything runs on the phone; no photo leaves it.
 </p>
 
@@ -581,11 +582,99 @@ function rotate180(img) {
   return out;
 }
 
+/* -------------------------------------------------------------- EXIF splice */
+/* Canvas drops EXIF entirely, so a phone-cleaned save loses the capture date
+   that the Python side preserves. The browser has no API to write EXIF, so we
+   copy the original file's raw EXIF APP1 segment byte-for-byte into the output
+   JPEG instead, patching only what must change in place -- never resizing the
+   segment, so no offsets elsewhere in it need to move:
+     - orientation reset to normal: createImageBitmap already applied the
+       original orientation to the pixels, so a surviving tag would rotate a
+       now-upright image a second time in any viewer that honours EXIF.
+     - the link to the thumbnail IFD is severed, since the embedded thumbnail
+       would still show the uncropped original in file browsers that prefer it
+       over decoding the JPEG. The orphaned thumbnail bytes are left in place
+       (harmless dead weight -- nothing points to them any more).
+     - pixel dimensions updated to match the crop, where the field exists. */
+
+function findExifSegment(buf) {
+  const b = new Uint8Array(buf);
+  if (b[0] !== 0xFF || b[1] !== 0xD8) return null;        // not a JPEG
+  let p = 2;
+  while (p + 4 <= b.length) {
+    if (b[p] !== 0xFF) break;
+    const marker = b[p + 1];
+    if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { p += 2; continue; }
+    if (marker === 0xDA || marker === 0xD9) break;         // scan data / EOI: no more headers
+    const len = (b[p + 2] << 8) | b[p + 3];
+    if (marker === 0xE1 && b[p + 4] === 0x45 && b[p + 5] === 0x78 && b[p + 6] === 0x69 &&
+        b[p + 7] === 0x66 && b[p + 8] === 0x00 && b[p + 9] === 0x00) {
+      return b.slice(p, p + 2 + len);
+    }
+    p += 2 + len;
+  }
+  return null;
+}
+
+// mutates `seg` (a standalone copy, safe to edit) in place
+function patchExifSegment(seg, outW, outH) {
+  const tiffStart = 10;                                   // marker(2)+len(2)+"Exif\0\0"(6)
+  const dv = new DataView(seg.buffer, seg.byteOffset, seg.byteLength);
+  const little = dv.getUint16(tiffStart) === 0x4949;
+  const rd16 = o => dv.getUint16(o, little), rd32 = o => dv.getUint32(o, little);
+  const wr16 = (o, v) => dv.setUint16(o, v, little), wr32 = (o, v) => dv.setUint32(o, v, little);
+
+  function readIFD(off) {
+    const n = rd16(tiffStart + off);
+    const entries = [];
+    for (let i = 0; i < n; i++) {
+      const e = tiffStart + off + 2 + i * 12;
+      entries.push({ tag: rd16(e), type: rd16(e + 2), count: rd32(e + 4), valueOff: e + 8 });
+    }
+    return { entries, nextOff: tiffStart + off + 2 + n * 12 };
+  }
+
+  try {
+    const ifd0 = readIFD(rd32(tiffStart + 4));
+    let exifIFDOff = null;
+    for (const e of ifd0.entries) {
+      if (e.tag === 0x0112 && e.type === 3) wr16(e.valueOff, 1);   // orientation -> normal
+      if (e.tag === 0x8769) exifIFDOff = rd32(e.valueOff);         // pointer to Exif sub-IFD
+    }
+    wr32(ifd0.nextOff, 0);                                 // drop the thumbnail IFD chain
+
+    if (exifIFDOff != null) {
+      for (const e of readIFD(exifIFDOff).entries) {
+        if (e.tag === 0xA002 && e.count === 1) (e.type === 4 ? wr32 : wr16)(e.valueOff, outW);
+        if (e.tag === 0xA003 && e.count === 1) (e.type === 4 ? wr32 : wr16)(e.valueOff, outH);
+      }
+    }
+  } catch { /* malformed EXIF: ship the file without these tweaks rather than fail the save */ }
+}
+
+async function withExif(blob, srcFile, outW, outH) {
+  if (!srcFile) return blob;
+  try {
+    const [srcBuf, outBuf] = await Promise.all([srcFile.arrayBuffer(), blob.arrayBuffer()]);
+    const seg = findExifSegment(srcBuf);
+    if (!seg) return blob;
+    patchExifSegment(seg, outW, outH);
+    const out = new Uint8Array(outBuf);
+    const spliced = new Uint8Array(out.length + seg.length);
+    spliced.set(out.subarray(0, 2), 0);                    // SOI
+    spliced.set(seg, 2);                                   // our patched EXIF APP1
+    spliced.set(out.subarray(2), 2 + seg.length);           // rest of the canvas JPEG
+    return new Blob([spliced], { type: "image/jpeg" });
+  } catch {
+    return blob;                                            // EXIF is nice to have, not essential
+  }
+}
+
 /* ============================================================ orchestration */
 
 const $ = id => document.getElementById(id);
 const statusEl = $("status");
-let resultCanvas = null, resultName = "cheki.jpg";
+let resultCanvas = null, resultName = "cheki.jpg", sourceFile = null;
 
 const setStatus = t => { statusEl.textContent = t; };
 const nextFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -601,6 +690,7 @@ function drawTo(canvas, img, maxW = 720) {
 }
 
 async function process(file) {
+  sourceFile = file;
   resultName = (file.name || "cheki").replace(/\.[^.]+$/, "") + "_clean.jpg";
   setStatus("reading photo…");
   await nextFrame();
@@ -760,8 +850,9 @@ $("rotate").addEventListener("click", () => {
 
 $("save").addEventListener("click", () => {
   if (!resultCanvas) return;
-  resultCanvas.toBlob(blob => {
-    const url = URL.createObjectURL(blob);
+  resultCanvas.toBlob(async blob => {
+    const withDate = await withExif(blob, sourceFile, resultCanvas.width, resultCanvas.height);
+    const url = URL.createObjectURL(withDate);
     const a = document.createElement("a");
     a.href = url; a.download = resultName;
     document.body.appendChild(a); a.click(); a.remove();

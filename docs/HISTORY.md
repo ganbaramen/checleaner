@@ -112,6 +112,45 @@ desktop CPU, expect 5–10 s on a Pixel 7.
 
 ---
 
+## Paper-frame detector ported to checleaner.py (2026-08-15)
+
+`checleaner.py`'s `detect_print` now uses the paper-frame method described in
+`docs/PIPELINE.md` § 3, replacing "everything that isn't desk". Re-run against
+`rancheki/` (22 files now — one single was added after the count above was
+written):
+
+All 12 singles fit, aspects **1.568–1.611**, closely matching the JS's own
+1.579–1.611 on the same folder — a big tightening from the old method's
+1.54–1.62. The one file below 1.579 is `033346`, already on record above as
+needing hand-trimming in both implementations, so it being the outlier in both
+is expected rather than a regression. All 10 historical multi/near-miss cases
+still classify the same way, including `053951339` (the three-print shot)
+still landing at aspect 1.884 and correctly flagged as a near-miss rather than
+silently accepted or silently dropped.
+
+### EXIF on the phone app
+
+`checleaner.html` now splices the source photo's raw EXIF APP1 segment into
+the saved JPEG (method in the file's own comment above `findExifSegment`).
+Verified two ways:
+
+- A synthetic file (orientation 6, a thumbnail, a crafted date) round-tripped
+  through the extracted `findExifSegment`/`patchExifSegment` functions: date
+  preserved, orientation reset to 1, thumbnail IFD link severed, dimensions
+  updated.
+- Playwright end-to-end through the real page on two `rancheki/` photos, one
+  cropped-single and one uncropped-multi: both saved files carried the
+  source's capture date and GPS unchanged, orientation normal, and pixel
+  dimensions matching the actual output.
+
+Caught in the process: the initial `"Exif\0\0"` signature check had two byte
+bugs (a transposed `i`/`f`, and one byte too many in the comparison) that made
+it never match, so EXIF would have silently never been copied. Both were only
+visible by actually running bytes through it — worth remembering if this code
+is touched again without a test alongside it.
+
+---
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
