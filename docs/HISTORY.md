@@ -315,6 +315,52 @@ reasoned about.
 
 ---
 
+## Two more real bugs found in the same review pass (2026-08-16)
+
+Same session, different symptom: user flagged 3 files in `review/` as
+overcropped. Two distinct bugs, both real, both fixed.
+
+**`trim_desk()`'s desk-hue reference can be near-white.** It samples a ring
+around the *original photo's* outer edge and assumes that's desk. On
+`20260803_034511524` and `20260803_034606768`, the card fills nearly the
+whole frame, so that ring instead sampled the card's own border -- reference
+colour came back at L≈240 with chroma magnitude (`nv`) 2.0 and 2.24. A hue
+*direction* derived from an almost-neutral reference is essentially noise,
+and the projection test downstream (`proj > 0.55*nv`) turns hypersensitive
+when `nv` itself is tiny, flagging the border's ordinary chroma jitter as
+desk. Confirmed by reproducing the exact pipeline (color-corrected image,
+same as `run()` uses, not the raw file -- the first repro attempt used the
+raw image and didn't show the bug) and measuring actual pixel brightness
+across the output's left/right edges to prove the border really was cut to
+~3% instead of the expected ~5.5%. Swept `nv` across all of `chekis/rancheki/`
+plus the rest of `chekis/main/`: every working file measured >= 3.6, both
+broken files measured ~2.0-2.24 -- clean separation. Fixed by skipping the
+trim entirely below `nv = 4` rather than trust a hue direction that thin.
+Zero regressions on the rancheki regression set (all residual-desk checks
+still pass at 0px).
+
+**A tight grid of cards can pass the single-card test.**
+`20260811_012314592` is an 11-card grid, not a single print, but the merged
+blob's overall aspect (1.626) and fill (0.944) both happened to land inside
+the single-card acceptance window, so it got warped and cropped as if it
+were one card -- the "crop" ended up keeping nearly the entire original
+frame (quad spanned 82% of the width, 99.9% of the height). Tried "does the
+blob touch the frame edge" as a discriminator first; rejected it after
+finding a *known-good* single (`20260812_002138234`, a legitimate close-up
+shot) with the same near-zero margin on every side -- edge-touching alone
+isn't safe. The signal that actually works: solidity, raw contour area over
+convex hull area. A real card's border has no internal seams, so its raw
+contour already equals its hull (solidity 1.0000, confirmed on
+`20260812_002138234`); the 11-card grid's seams between cells leave notches
+that only the hull smooths over (solidity 0.9424). Swept solidity across
+every currently-accepted single in both `chekis/rancheki/` and `chekis/main/`
+-- next-lowest was 0.9895, a comfortable margin above the break case. Added
+`--min-solidity` (default 0.97) as a fourth acceptance gate alongside
+aspect/fill; the grid file now correctly falls through to the near-miss path
+and lands in `review/` with a clear reason instead of a distorted crop.
+
+---
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

@@ -92,9 +92,18 @@ old method's 1.54–1.62 (and one photo the old mask fitted at 1.43). The paper
 border is the more distinctive feature — bright and neutral is something desk
 never is.
 
-Accept the fit only if: exactly one large blob, aspect ∈ [1.53, 1.65], and fill
-≥ 0.93. Fill is measured on the convex hull, so a frame with an unfilled middle
-still scores ~1.
+Accept the fit only if: exactly one large blob, aspect ∈ [1.53, 1.65], fill
+≥ 0.93, **and solidity ≥ 0.97**. Fill is measured on the convex hull, so a
+frame with an unfilled middle still scores ~1 — which is also the hole this
+leaves open: a tight grid of several cards packed with almost no gaps can
+*also* score high on both aspect and fill, since the grid's overall shape can
+coincidentally land inside the single-card window. Solidity is the raw
+contour area over the hull area, and catches what fill can't: real seams
+between cards leave notches in the raw mask that only the hull smooths over,
+so a genuine single card (no seams) has solidity essentially = 1.0, while a
+merged grid measures noticeably lower — 0.94 on the one that motivated this,
+against 0.99+ on every known-good single card checked. See `docs/HISTORY.md`
+(2026-08-16) for the numbers.
 
 If the fit fails and the aspect is *far* out of range, that is an ordinary
 multi-print photo — balance it and leave it whole, no flag. Only a near-miss
@@ -134,6 +143,20 @@ Then **second-guess it with a different test**: a plain warm-and-dark check
 so it does not share that model's blind spots. Skip the outermost 4 px — every
 crop has a soft dark rim from the card edge and from resampling, and counting it
 flags everything. Flag if desk reaches more than 15 px in.
+
+**The desk's hue direction needs a real colour to point at.** It's derived from
+the median colour in a ring around the *original photo's* outer edge, on the
+assumption that's desk. When the card fills nearly the whole frame, that ring
+can instead sample the card's own white border (or some other near-neutral
+region) — the reference colour comes back essentially white, its "hue
+direction" is short and arbitrary, and the projection test downstream turns
+noise-sensitive enough to flag the border's own ordinary chroma jitter as
+desk. Found via two overcropped outputs with the border trimmed to almost
+nothing; both had a reference chroma magnitude (`nv`) around 2.0–2.24, while
+every other file checked — the whole `chekis/rancheki/` fixture set plus the
+rest of that batch — measured 3.6 or higher. Guarded: skip the trim entirely
+below `nv = 4`, rather than trust a hue direction that thin. See
+`docs/HISTORY.md` (2026-08-16).
 
 ## 5. Orient
 

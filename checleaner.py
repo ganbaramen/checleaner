@@ -185,6 +185,7 @@ class Detection:
     quad: np.ndarray | None = None   # 4x2 in full-res coords, long edge first
     aspect: float = 0.0
     fill: float = 0.0                # how rectangular the detected blob is
+    solidity: float = 1.0            # raw contour area / hull area -- see _blob_detection
     area: float = 0.0                # full-res px^2, for weighting multi-blob results
     n_blobs: int = 0
     ok: bool = False
@@ -241,6 +242,12 @@ def _blob_detection(labels: np.ndarray, idx: int, sc: float) -> Detection | None
         aspect=(edges[0] + edges[2]) / (edges[1] + edges[3]),
         # fill measured on the hull, so a frame with an unfilled middle still scores ~1
         fill=cv2.contourArea(hull) / (rw * rh),
+        # raw contour vs. hull: a tight grid of several cards can fill a rect
+        # almost as well as one real card (high `fill`), but the seams between
+        # cards leave notches in the raw mask that only the hull smooths over.
+        # A real card's border has no seams, so its raw contour already *is*
+        # its hull -- solidity lands at 1.0, not just close to it.
+        solidity=cv2.contourArea(contour) / cv2.contourArea(hull),
         area=(rw * rh) / (sc * sc),
     )
 
@@ -399,6 +406,17 @@ def trim_desk(img: np.ndarray, quad: np.ndarray, cap=0.035, analysis_w=900):
     mu = np.median(lab_full[ring], axis=0)
     va, vb = mu[1] - 128, mu[2] - 128
     nv = float(np.hypot(va, vb)) + 1e-6
+    if nv < 4:
+        # The ring is barely coloured at all -- happens when the card fills
+        # almost the whole frame, or the backdrop isn't a classic desk, so
+        # there's little real desk in that outer 3% to sample. A hue
+        # *direction* derived from a near-neutral reference is essentially
+        # noise, and the projection test below turns hypersensitive: it can
+        # cross threshold on the card's own white border's ordinary chroma
+        # jitter. Better to skip the trim than cut into the border on a
+        # signal this unreliable. Every known-good file measures >= ~3.6;
+        # the break cases measured ~2.0-2.24.
+        return np.asarray(quad, np.float32), dict(top=0, bottom=0, left=0, right=0)
     ua, ub = va / nv, vb / nv
 
     aw = analysis_w
@@ -626,7 +644,8 @@ def run(args) -> int:
             det = detect_print(path)
             single = (det.quad is not None and det.n_blobs == 1
                       and args.aspect_lo <= det.aspect <= args.aspect_hi
-                      and det.fill >= args.min_fill)
+                      and det.fill >= args.min_fill
+                      and det.solidity >= args.min_solidity)
             if single:
                 r.stats.update(aspect=round(det.aspect, 3), fill=round(det.fill, 3))
                 quad, insets = trim_desk(img, det.quad)
@@ -653,7 +672,8 @@ def run(args) -> int:
                              and 1.40 <= det.aspect <= 1.90)
                 if near_miss:
                     r.kind = "single?"
-                    r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f})")
+                    r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "
+                                   f"solidity {det.solidity:.3f})")
                 else:
                     aligned = align_multi(img, detect_all_prints(path))
                     if aligned is not None:
@@ -816,6 +836,10 @@ def main():
     p.add_argument("--aspect-hi", type=float, default=1.65, help="reject fits above this")
     p.add_argument("--min-fill", type=float, default=0.93,
                    help="reject blobs less rectangular than this")
+    p.add_argument("--min-solidity", type=float, default=0.97,
+                   help="reject blobs whose raw mask has notches the hull "
+                        "smooths over -- catches a tight card grid that "
+                        "coincidentally fits the single-card aspect/fill window")
     p.add_argument("--min-border-ratio", type=float, default=1.6,
                    help="flag orientation when the two end borders look this alike "
                         "(a real instax mini measures ~2.1)")
