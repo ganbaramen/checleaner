@@ -33,6 +33,7 @@ import argparse
 import csv
 import os
 import sys
+import textwrap
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -666,6 +667,38 @@ def _write_report(path, files, results):
                          s.get("align_tilt"), s.get("align_n"), "; ".join(r.flags)])
 
 
+# plain-English gloss per flag prefix, for review/report.txt -- the flag
+# string itself (also used in report.csv) stays terse and technical, so this
+# is matched by prefix rather than replacing it
+_FLAG_EXPLANATIONS = [
+    ("white reference",
+     "The print's white border was overexposed in the original photo, so the "
+     "colour correction it's based on is a bit of a guess. Check the colours "
+     "don't look washed out or tinted -- if the photo was shot in bright "
+     "light, that's the fix for next time, not something to redo here."),
+    ("extreme correction",
+     "This photo needed an unusually large colour correction. Check for "
+     "over-saturated colour or noisy shadows, especially in reds."),
+    ("fit rejected",
+     "Found one blob that's roughly card-shaped but not confident enough to "
+     "crop automatically. Look at the photo: if it's genuinely a single "
+     "print (shot at an odd angle, say), crop and straighten it yourself; if "
+     "it's actually multiple prints -- the usual reason this fires -- it's "
+     "already colour-balanced correctly and needs nothing further."),
+    ("desk still on",
+     "A sliver of desk is still visible on one edge of the crop. Trim it "
+     "further by hand if it bothers you."),
+    ("orientation uncertain",
+     "The two ends of the print's border looked too similar in width to "
+     "confidently tell which one is the wide signature border. Check "
+     "whether the photo is upside down and rotate 180 degrees if so."),
+]
+
+
+def _explain_flag(flag: str) -> str:
+    return next((e for prefix, e in _FLAG_EXPLANATIONS if flag.startswith(prefix)), "")
+
+
 def _write_review_notes(review_dir, files, results):
     """Plain-text summary dropped in review/ itself, next to the photos it
     describes, so what needs a look is readable without cross-referencing
@@ -681,6 +714,11 @@ def _write_review_notes(review_dir, files, results):
             fh.write(f"{name}\n")
             for flag in r.flags:
                 fh.write(f"  - {flag}\n")
+                explanation = _explain_flag(flag)
+                if explanation:
+                    fh.write(textwrap.fill(explanation, width=76,
+                                            initial_indent="      ",
+                                            subsequent_indent="      ") + "\n")
             fh.write("\n")
 
 
