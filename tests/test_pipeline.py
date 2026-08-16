@@ -30,8 +30,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
-                        detect_print, warp, orient, build_parser, content_rotation,
-                        ASPECT)
+                        detect_print, detect_all_prints, align_multi, warp, orient,
+                        build_parser, content_rotation, ASPECT)
 from tools.detect import classify   # the single/single?/multi gate, one copy
 
 
@@ -198,6 +198,32 @@ def test_row_of_prints_is_not_a_single_card():
     finally:
         os.remove(p)
     assert not _is_single(d), f"row misread as single (aspect {d.aspect:.3f})"
+
+
+def test_align_crop_picks_best_fit_aspect():
+    """align_multi picks the CROP_ASPECTS shape with the most balanced margins:
+    a row of two portrait cards (bbox ~1.26) crops at 4:3, and with a quarter
+    turn folded in, the same photo crops at 3:4 -- the shape is chosen for the
+    FINAL orientation, so a turn can never smuggle in an excluded ratio."""
+    p = _write(make_row(cols=2))
+    try:
+        dets = detect_all_prints(p)
+        img = cv2.imread(p)
+        out = align_multi(img, dets)
+        assert out is not None, "row of 2 should align"
+        crop, st = out
+        assert st["align_crop"] == "4:3", f"chose {st['align_crop']}, want 4:3"
+        got = crop.shape[1] / crop.shape[0]
+        assert abs(got - 4 / 3) < 0.01, f"crop ratio {got:.3f}, want ~1.333"
+
+        out = align_multi(img, dets, turn=1)
+        assert out is not None
+        crop, st = out
+        assert st["align_crop"] == "3:4", f"turned: chose {st['align_crop']}, want 3:4"
+        got = crop.shape[1] / crop.shape[0]
+        assert abs(got - 3 / 4) < 0.01, f"turned crop ratio {got:.3f}, want ~0.75"
+    finally:
+        os.remove(p)
 
 
 def test_grid_is_rejected_by_solidity_not_aspect():

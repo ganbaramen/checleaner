@@ -426,6 +426,28 @@ can't ship an ONNX model. Instead the app gained ⟲ 90° / 180° / ⟳ 90° but
 so a levelled-but-sideways result is one tap from upright. Single-card output is
 unchanged (still 1800×2867, still flags residual desk).
 
+## Multi-print crops get a best-fit aspect ratio (2026-08-16)
+
+`align_multi()` used to crop at the source photo's own aspect ratio. Now it
+picks the best fit from `CROP_ASPECTS` (4:3, 3:4, 1:1, 16:9 -- a module-level
+list, extend it there): tightest crop per candidate, scored by how balanced the
+horizontal-vs-vertical margins come out; a candidate that would poke outside
+the photo is disqualified, and if all are, the old own-ratio behaviour is the
+fallback -- so a print can never be cut off. Recorded in `report.csv`'s new
+`align_crop` column.
+
+Because a quarter turn flips a crop's aspect (a 16:9 turned upright becomes the
+9:16 the list deliberately excludes), the face-derived content turn is now
+decided *first*, on the balanced frame, and folded into the alignment warp --
+one rotation instead of rotate-then-rot90. Verified on the three previously
+turned aligned files: same 90° turn detected, output now 4:3, and re-running
+face detection on the result confirms upright.
+
+Sweep of all 15 aligned files in `chekis/main/`: 8 chose 4:3, 5 chose 1:1
+(grids), 2 fell back to original (tall diagonal layouts where every candidate
+poked outside -- one at frame ratio 0.753, a hair off 3:4's 0.750, which is the
+fallback working at the margin, not a bug). None declined that aligned before.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

@@ -114,11 +114,12 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    by hand — port the same asserted numbers to a Playwright-driven check so both
    implementations are safe to change. Optionally, add real-photo golden numbers
    from `docs/HISTORY.md` to the opt-in tier.
-2. **Auto-reorient multi-print photos in `checleaner.html`.** Levelling
-   (`align_multi()`) is now ported to the phone app as `alignMulti()`; content
-   reorientation (`content_rotation()`) is *not* — the app offers manual
-   ⟲/⟳/180° rotate buttons instead, since the offline single-file page can't
-   ship a face model. Closing the gap would need a JS face detector
+2. **Catch `checleaner.html` up on multi-print handling.** Levelling
+   (`align_multi()`) is ported as `alignMulti()`, but two later additions are
+   not: the best-fit `CROP_ASPECTS` crop (tried in Python first — the JS still
+   crops at the frame's own ratio) and content reorientation
+   (`content_rotation()`) — the app offers manual ⟲/⟳/180° rotate buttons
+   instead, since the offline single-file page can't ship a face model. Closing the gap would need a JS face detector
    (e.g. onnxruntime-web + the same YuNet model), which also means solving how a
    `file://` page loads WASM offline — see item 4.
 3. **Split multi-print photos into separate crops.** Still balanced as one

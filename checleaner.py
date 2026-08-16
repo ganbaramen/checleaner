@@ -322,15 +322,35 @@ def _dominant_tilt(dets: list[Detection]) -> float:
     return float(deg - 90 if deg >= 45 else deg)
 
 
-def align_multi(img: np.ndarray, dets: list[Detection]):
+# Preferred crop shapes for multi-print photos, tried in addition to the
+# frame's own ratio. Order doesn't matter (best fit wins); add new shapes here.
+# Deliberately no 9:16 -- an ultra-tall crop of prints on a desk reads as an
+# accident, not a composition.
+CROP_ASPECTS = [
+    ("4:3", 4 / 3),
+    ("3:4", 3 / 4),
+    ("1:1", 1.0),
+    ("16:9", 16 / 9),
+]
+
+
+def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
     """Rotate and crop a multi-print photo so the prints sit level and centred.
 
-    Rotates the whole frame by the dominant tilt of the detected prints, so as
-    many as possible land parallel to the frame edges, then crops around their
-    union bounding box with equal margins top/bottom and left/right, at the
-    original photo's aspect ratio (whichever crop dimension that ratio doesn't
-    pin is grown to fit, so the crop is the tightest one that still contains
-    every print).
+    Rotates the whole frame by the dominant tilt of the detected prints plus
+    `turn` quarter-turns (CCW, from content_rotation -- folded into the same
+    warp so the crop shape is chosen for the *final* orientation; cropping
+    first and turning after would silently convert a chosen 16:9 into the 9:16
+    that CROP_ASPECTS deliberately excludes), then crops around the prints'
+    union bounding box with equal margins top/bottom and left/right.
+
+    The crop shape is the best fit from CROP_ASPECTS: for each candidate, the
+    tightest crop at that ratio still containing every print pins one axis
+    (zero margin) and leaves the excess on the other, so the candidate with the
+    most balanced horizontal-vs-vertical margins is simply the one closest to
+    the prints' own bounding-box shape. The crop is never grown beyond tightest
+    to force the margins equal -- that would buy symmetry with desk. If no
+    candidate fits inside the photo, the frame's own ratio is the fallback.
 
     Returns None -- leave the photo whole, today's existing behaviour --
     rather than force a crop that reaches into the blank corners the rotation
@@ -341,7 +361,8 @@ def align_multi(img: np.ndarray, dets: list[Detection]):
     if not dets:
         return None
     h, w = img.shape[:2]
-    angle = _dominant_tilt(dets)
+    tilt = _dominant_tilt(dets)
+    angle = tilt + 90.0 * (turn % 4)
 
     center = (w / 2, h / 2)
     M = cv2.getRotationMatrix2D(center, angle, 1.0)
@@ -356,26 +377,44 @@ def align_multi(img: np.ndarray, dets: list[Detection]):
     x0, y0 = pts.min(axis=0)
     x1, y1 = pts.max(axis=0)
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    bw2, bh2 = (x1 - x0) / 2, (y1 - y0) / 2
 
-    ratio = w / h
-    hh = max((y1 - y0) / 2, (x1 - x0) / 2 / ratio)
-    hw = hh * ratio
-    cx0, cx1, cy0, cy1 = cx - hw, cx + hw, cy - hh, cy + hh
-
-    # does the crop stay inside the photo's real (unrotated) footprint, or
-    # would it reach past an edge into the blank fill the rotation opened up?
+    # does a crop stay inside the photo's real (unrotated) footprint, or would
+    # it reach past an edge into the blank fill the rotation opened up?
     invM = cv2.invertAffineTransform(M)
-    corners = np.array([[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]], np.float32)
-    back = cv2.transform(corners.reshape(-1, 1, 2), invM).reshape(-1, 2)
-    pad = 0.5
-    if not ((back[:, 0] >= -pad).all() and (back[:, 0] <= w + pad).all()
-            and (back[:, 1] >= -pad).all() and (back[:, 1] <= h + pad).all()):
-        return None
 
-    x0i, y0i = max(0, int(round(cx0))), max(0, int(round(cy0)))
-    x1i, y1i = min(new_w, int(round(cx1))), min(new_h, int(round(cy1)))
+    def fits(hw, hh):
+        corners = np.array([[cx - hw, cy - hh], [cx + hw, cy - hh],
+                            [cx + hw, cy + hh], [cx - hw, cy + hh]], np.float32)
+        back = cv2.transform(corners.reshape(-1, 1, 2), invM).reshape(-1, 2)
+        pad = 0.5
+        return ((back[:, 0] >= -pad).all() and (back[:, 0] <= w + pad).all()
+                and (back[:, 1] >= -pad).all() and (back[:, 1] <= h + pad).all())
+
+    best = None
+    for label, r in CROP_ASPECTS:
+        hh = max(bh2, bw2 / r)
+        hw = hh * r
+        score = abs((hw - bw2) - (hh - bh2))       # excess margin: 0 on the pinned axis
+        if fits(hw, hh) and (best is None or score < best[0]):
+            best = (score, label, hw, hh)
+    if best is not None:
+        _, crop_label, hw, hh = best
+    else:
+        # the frame's own shape (as turned) -- exactly the pre-CROP_ASPECTS
+        # behaviour, and by construction of new_w/new_h it can only fail the
+        # footprint test through the tilt, same as before
+        ratio = (w / h) if turn % 2 == 0 else (h / w)
+        hh = max(bh2, bw2 / ratio)
+        hw = hh * ratio
+        if not fits(hw, hh):
+            return None
+        crop_label = "original"
+
+    x0i, y0i = max(0, int(round(cx - hw))), max(0, int(round(cy - hh)))
+    x1i, y1i = min(new_w, int(round(cx + hw))), min(new_h, int(round(cy + hh)))
     crop = rotated[y0i:y1i, x0i:x1i]
-    return crop, dict(align_tilt=round(angle, 2), align_n=len(dets))
+    return crop, dict(align_tilt=round(tilt, 2), align_n=len(dets), align_crop=crop_label)
 
 
 def warp(img: np.ndarray, quad: np.ndarray, out_w: int) -> np.ndarray:
@@ -709,7 +748,8 @@ def run(args) -> int:
                 for flag in (f.strip() for f in old.get("flags", "").split(";")):
                     if flag and flag not in r.flags:
                         r.flags.append(flag)
-                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n", "reorient"):
+                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n",
+                          "align_crop", "reorient"):
                     v = old.get(k)
                     if v not in (None, ""):
                         r.stats[k] = v
@@ -757,24 +797,28 @@ def run(args) -> int:
                 r.kind = "multi"
                 near_miss = (det.quad is not None and det.n_blobs == 1
                              and 1.40 <= det.aspect <= 1.90)
+                # align_multi only levels; the content turn (a quarter or half
+                # turn so the frame isn't left sideways) is decided *first* and
+                # folded into the alignment warp, because the crop shape is
+                # picked from CROP_ASPECTS for the final orientation -- turning
+                # after cropping would flip a chosen 16:9 into 9:16
+                turn = 0 if args.no_reorient else content_rotation(img)
                 if near_miss:
                     r.kind = "single?"
                     r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "
                                    f"solidity {det.solidity:.3f})")
                 else:
-                    aligned = align_multi(img, detect_all_prints(path))
+                    aligned = align_multi(img, detect_all_prints(path), turn=turn)
                     if aligned is not None:
                         img, align_stats = aligned
                         r.kind = "aligned"
                         r.stats.update(align_stats)
-
-                # align_multi only levels; stand the frame upright from its
-                # content (a quarter or half turn) so it isn't left sideways
-                if not args.no_reorient:
-                    k = content_rotation(img)
-                    if k:
-                        img = np.ascontiguousarray(np.rot90(img, k))
-                        r.stats["reorient"] = k * 90
+                        if turn:
+                            r.stats["reorient"] = turn * 90
+                        turn = 0            # already folded into the warp
+                if turn:                    # single? / align declined: turn whole
+                    img = np.ascontiguousarray(np.rot90(img, turn))
+                    r.stats["reorient"] = turn * 90
         else:
             r.kind = "nocrop"
 
@@ -827,7 +871,7 @@ def _write_report(path, files, results):
         # never drift out of sync with where the file actually landed
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
                      "clipped_pct", "aspect", "fill", "border_ratio",
-                     "align_tilt", "align_n", "reorient", "flags"])
+                     "align_tilt", "align_n", "align_crop", "reorient", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
@@ -835,7 +879,8 @@ def _write_report(path, files, results):
             wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
                          s.get("gain"), s.get("clipped_pct"), s.get("aspect"),
                          s.get("fill"), s.get("border_ratio"),
-                         s.get("align_tilt"), s.get("align_n"), s.get("reorient"),
+                         s.get("align_tilt"), s.get("align_n"), s.get("align_crop"),
+                         s.get("reorient"),
                          "; ".join(r.flags)])
 
 

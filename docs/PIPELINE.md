@@ -219,13 +219,25 @@ take the union bounding box of every detected blob in the rotated frame and
 crop around it centred at the bounding box's own centre — centring there
 makes the equal-margin requirement (top gap = bottom gap, left gap = right
 gap) automatic for *any* crop size, not something to solve for separately.
-The crop is then grown in whichever dimension the target aspect ratio (the
-original photo's, unrotated) doesn't already pin, so it's the tightest crop
-that both contains every print and matches that ratio.
 
-**Bail out, don't force it.** If that ideal crop would reach past the real
-photo into the blank corners the rotation opened up, `align_multi()` returns
-`None` and the photo is left whole — today's existing behaviour. Checked by
+The crop's shape comes from `CROP_ASPECTS` (4:3, 3:4, 1:1, 16:9 — a plain
+list, extend it there). For each candidate, the tightest crop at that ratio
+containing every print pins one axis (zero margin) and leaves the excess on
+the other, so "best fit" — horizontal and vertical margins as close as
+possible — reduces to the candidate closest to the prints' own bounding-box
+shape. The crop is never grown past tightest to force the margins equal:
+that buys symmetry with desk. A candidate that would poke outside the photo
+is disqualified; if all four are, the frame's own ratio is the fallback (the
+pre-`CROP_ASPECTS` behaviour), so nothing ever cuts a print off. The choice
+is recorded in `report.csv`'s `align_crop` column. 9:16 is deliberately not
+in the list — an ultra-tall crop of prints on a desk reads as an accident —
+which is also why the content turn (below) is folded *into* the alignment
+warp rather than applied after: turning a finished 16:9 crop would flip it
+into exactly that excluded shape.
+
+**Bail out, don't force it.** If even the fallback crop would reach past the
+real photo into the blank corners the rotation opened up, `align_multi()`
+returns `None` and the photo is left whole — today's existing behaviour. Checked by
 mapping the crop's corners back through the inverse rotation and testing
 they still land inside the original frame. This matters: these photos are
 occasionally shot with prints laid out diagonally with barely any desk
@@ -259,9 +271,11 @@ The lesson was that card *geometry* can't answer this — you have to read the
 
 ### Standing the frame upright from content (faces)
 
-Geometry gives level; it can't give up. So after `align_multi()` levels a
-frame, `content_rotation()` reads the content to choose the remaining quarter
-or half turn. Chekis are photographs of people, so the signal is faces: score
+Geometry gives level; it can't give up. So `content_rotation()` reads the
+content to choose the remaining quarter or half turn, which is decided on the
+balanced frame *before* alignment and folded into `align_multi()`'s warp (so
+the `CROP_ASPECTS` shape is picked for the final orientation — see the crop
+paragraph in § 6); when alignment declines, the whole frame is turned instead. Chekis are photographs of people, so the signal is faces: score
 each of the four 90° turns by summed face confidence (OpenCV's YuNet detector)
 and take the turn that stands the most faces upright. This is the same reason
 `orient()` reads a single card's window instead of its geometry — the picture
