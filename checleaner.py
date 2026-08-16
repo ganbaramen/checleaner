@@ -562,10 +562,49 @@ def run(args) -> int:
     os.makedirs(good_dir, exist_ok=True)
     os.makedirs(review_dir, exist_ok=True)
 
+    # A file already sitting in balanced/ or review/ produces the identical
+    # output if reprocessed -- the pipeline is deterministic -- so redoing it
+    # is pure waste. Skip by default and reuse the prior report.csv row for
+    # its pass-2 stats/flags; --force to reprocess everything regardless
+    # (e.g. after an algorithm change that should benefit every file).
+    prior = {} if args.force else _read_prior_report(os.path.join(out_root, "report.csv"))
+    already_done = {}
+    for name in files:
+        in_good = os.path.exists(os.path.join(good_dir, name))
+        in_review = os.path.exists(os.path.join(review_dir, name))
+        if in_good and not in_review:
+            already_done[name] = "balanced"
+        elif in_review and not in_good:
+            already_done[name] = "review"
+        # else: present in neither (normal) or both (stale duplicate from
+        # before a file got reclassified) -- either way, not cleanly
+        # resolved, so fall through and reprocess it. A duplicate gets
+        # cleaned up as a side effect of the stale-copy removal below.
+    n_skipped = 0
+
     # -- pass 2: apply, crop, orient ---------------------------------------
     for name in files:
-        path = os.path.join(src, name)
         r = results[name]
+
+        if not args.force and name in already_done:
+            n_skipped += 1
+            old = prior.get(name)
+            if old:
+                r.kind = old.get("kind") or r.kind
+                for flag in (f.strip() for f in old.get("flags", "").split(";")):
+                    if flag and flag not in r.flags:
+                        r.flags.append(flag)
+                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n"):
+                    v = old.get(k)
+                    if v not in (None, ""):
+                        r.stats[k] = v
+            else:
+                r.kind = "skipped"
+            print(f"  {name:<34} {r.kind:<7} -> {already_done[name]:<8} "
+                  "(unchanged, already processed)", flush=True)
+            continue
+
+        path = os.path.join(src, name)
         gain, off, desk = solved[name]
         gamma = (desk_gamma(desk, target_u, white_t, black_t, args.desk_strength)
                  if (desk is not None and target_u is not None) else None)
@@ -615,6 +654,12 @@ def run(args) -> int:
             r.kind = "nocrop"
 
         dest_dir = review_dir if r.flags else good_dir
+        # a reprocess (--force, or a code change) can reclassify a file --
+        # drop any stale copy left in the other directory so it isn't
+        # duplicated across both
+        stale = os.path.join(good_dir if dest_dir is review_dir else review_dir, name)
+        if os.path.exists(stale):
+            os.remove(stale)
         dest = os.path.join(dest_dir, name)
         cv2.imwrite(dest, img, [cv2.IMWRITE_JPEG_QUALITY, args.quality])
         _copy_exif(path, dest, img.shape[1], img.shape[0])
@@ -625,7 +670,8 @@ def run(args) -> int:
     _write_report(os.path.join(out_root, "report.csv"), files, results)
     _write_review_notes(review_dir, files, results)
     n_review = sum(1 for r in results.values() if r.flags)
-    print(f"\n{len(files) - n_review} in balanced/, {n_review} in review/")
+    skip_note = f" ({n_skipped} unchanged, skipped)" if n_skipped else ""
+    print(f"\n{len(files) - n_review} in balanced/, {n_review} in review/{skip_note}")
     print(f"report: {os.path.join(out_root, 'report.csv')}")
     if n_review:
         print(f"review notes: {os.path.join(review_dir, 'report.txt')}")
@@ -699,6 +745,21 @@ def _explain_flag(flag: str) -> str:
     return next((e for prefix, e in _FLAG_EXPLANATIONS if flag.startswith(prefix)), "")
 
 
+def _read_prior_report(path):
+    """Load a previous run's report.csv, if there is one, so a file that's
+    already in balanced/ or review/ can carry forward the pass-2 stats and
+    flags that produced it instead of redoing that (expensive) work. Returns
+    {} if there's nothing to read yet -- normal on a folder's first run.
+    """
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, newline="") as fh:
+            return {row["file"]: row for row in csv.DictReader(fh)}
+    except (OSError, csv.Error, KeyError):
+        return {}
+
+
 def _write_review_notes(review_dir, files, results):
     """Plain-text summary dropped in review/ itself, next to the photos it
     describes, so what needs a look is readable without cross-referencing
@@ -737,6 +798,10 @@ def main():
     p.add_argument("--quality", type=int, default=96, help="JPEG quality")
     p.add_argument("--no-crop", action="store_true", help="colour-balance only")
     p.add_argument("--dry-run", action="store_true", help="measure and report, write nothing")
+    p.add_argument("--force", action="store_true",
+                   help="reprocess every file, even ones already in balanced/ or review/ "
+                        "(default: skip them and reuse their last result -- the expensive "
+                        "part is the full-resolution colour pass, not detection)")
     p.add_argument("--aspect-lo", type=float, default=1.53, help="reject fits below this")
     p.add_argument("--aspect-hi", type=float, default=1.65, help="reject fits above this")
     p.add_argument("--min-fill", type=float, default=0.93,

@@ -231,6 +231,41 @@ to the photos it's talking about rather than requiring a cross-reference.
 
 ---
 
+## checleaner.py skips already-processed files (2026-08-15)
+
+Reported problem: a full run over a growing `chekis/main/` was taking a
+while, because every run reprocessed every file, including ones from months
+ago that will never change. Profiling pinned the cost on the full-resolution
+colour pass (`apply()`, ~3 s/photo) — detection and the thumbnail-based
+measurement pass are cheap by comparison (well under 1 s).
+
+Considered per-directory `pending/`/`processed/` splitting for the *source*
+photos, but the pipeline is already deterministic, so the simpler fix is to
+check the *output*: a file already in `balanced/` or `review/` is skipped,
+reusing its prior `report.csv` row for stats/flags, unless `--force`. No
+directory reorganizing needed, and it also means a hand-fixed `review/` file
+no longer gets silently clobbered by the next run (it did before this).
+Pass 1 still measures every file regardless, so the folder-wide desk target
+stays accurate even when pass 2 is skipped for most of them.
+
+Bug caught while testing this against the real folder: a handful of files
+that had been reclassified `balanced/` → `review/` across earlier runs this
+session still had a stale copy sitting in the old directory. The first
+version of the skip check looked in `balanced/` before `review/` and trusted
+whichever it found first, so it happily "skipped" a stale, wrong-directory
+copy and reported it as up to date. Fixed two ways: a file present in *both*
+directories is now treated as unresolved and reprocessed (which cleans up
+the duplicate as a side effect, via a new stale-copy removal on every fresh
+write, not just skip checks); real run on `chekis/main/` confirmed all 18
+existing duplicates cleared to 0 and reprocessed correctly.
+
+Measured effect on `chekis/main/`'s 49 files: a no-op rerun (nothing new)
+dropped from ~8 minutes to ~65 s -- all of that remaining time is the pass-1
+measurement, which is unavoidable since the desk target needs it. Adding one
+new file processed only that file, confirmed by timing.
+
+---
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

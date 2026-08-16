@@ -32,11 +32,21 @@ Source photos are never modified in place. Output goes to `balanced/` (and
 pip install numpy opencv-python pillow scipy piexif
 python3 checleaner.py chekis/main/            # -> balanced, review, report.csv inside it
 python3 checleaner.py chekis/main/ --dry-run  # measure and report, write nothing
+python3 checleaner.py chekis/main/ --force    # reprocess everything, not just new files
 ```
 
-~10 s per photo. `report.csv` records every measurement and flag, including for
-files that passed — check it rather than assuming a clean run means clean output.
-Its `dest` column says `balanced` or `review` outright (derived from whether
+~3 s per photo for the (cheap) measurement pass, ~10 s more for any file actually
+reprocessed. A file already in `balanced/` or `review/` is skipped by default and
+its prior `report.csv` row reused — the pipeline is deterministic, so redoing it
+would produce byte-identical output. This is why folders don't need separate
+pending/done directories: just drop new photos in and rerun: only the new ones
+(or a file present in *neither* or, if something went wrong, present in *both*
+output dirs) get the expensive full-resolution pass. Pass `--force` after a code
+or calibration change, so every file benefits rather than just new ones.
+
+`report.csv` records every measurement and flag, including for files that
+passed — check it rather than assuming a clean run means clean output. Its
+`dest` column says `balanced` or `review` outright (derived from whether
 `flags` is empty, so it can't drift out of sync with where the file actually
 landed); `review/report.txt` lists just the flagged files and why, next to the
 photos themselves — meant to be readable without watching console output,
