@@ -247,8 +247,42 @@ cards, coincidentally landing near the same `k=2` ratio for reasons unrelated
 to any card's orientation. ~30% precision on real data. Abandoned rather than
 shipped even as a review flag — a flag wrong 7 times out of 10 trains you to
 ignore it, which defeats the point. See `docs/HISTORY.md` for the numbers.
-No fix currently exists for this; it needs per-print detection (next steps
-item 3 in `CLAUDE.md`), not a better frame-level heuristic.
+
+The lesson was that card *geometry* can't answer this — you have to read the
+*content*, which is what the reorientation step below finally does.
+
+### Standing the frame upright from content (faces)
+
+Geometry gives level; it can't give up. So after `align_multi()` levels a
+frame, `content_rotation()` reads the content to choose the remaining quarter
+or half turn. Chekis are photographs of people, so the signal is faces: score
+each of the four 90° turns by summed face confidence (OpenCV's YuNet detector)
+and take the turn that stands the most faces upright. This is the same reason
+`orient()` reads a single card's window instead of its geometry — the picture
+knows which way is up when the outline doesn't.
+
+Two things keep it from *introducing* errors, which matters because the vast
+majority of multi-print frames are already upright and must not be touched:
+
+- **A conservative margin.** A turn only wins over leaving the frame alone when
+  the frame as-is has little face evidence *and* another turn is decisively
+  better (`min_score` 1.2, `margin` 1.5×). A near-tie — one real file scored
+  1.61 upright vs 1.82 for a half turn — is left alone, not flipped. Missing a
+  rotation costs one review; inventing one corrupts a photo that was right.
+- **Graceful absence.** The detector needs a small model (see below); if it
+  can't be loaded, `content_rotation()` returns "no turn" and the frame is left
+  exactly as `align_multi()` left it — the pre-face behaviour, never an error.
+
+On `chekis/main/` this turned exactly the five known-sideways frames (four a
+quarter turn, one a half turn, including the two-landscape-plus-four-portrait
+mixed layout the geometry approach could never have split) and left all 44
+other multi/aligned/`single?` frames untouched.
+
+**Model.** YuNet, ~230 KB, cached under `~/.cache/checleaner/` and fetched from
+the OpenCV Zoo on first use (override the path with `$CHEKI_FACE_MODEL`, or
+disable the whole step with `--no-reorient`). This is the pipeline's one learned
+component; everything else is classic CV. It lives only in `checleaner.py` — the
+phone app doesn't do multi-print alignment at all yet.
 
 ---
 

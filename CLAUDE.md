@@ -88,6 +88,11 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
   [0.86, 1.16]). It must never be allowed to drag the prints' colour around.
 - **Scope is fronts.** Backs were handled once as an exception and are documented
   in `docs/PIPELINE.md`; the current code does not support them.
+- **Multi-print reorientation is conservative by design.** `content_rotation()`
+  (faces, `docs/PIPELINE.md` § 6) only turns a frame when the current orientation
+  has weak face evidence *and* another turn is decisively better. Do not loosen
+  that margin to catch a few more — its whole job is to never turn a frame that
+  was already right. It also must stay a no-op when the model is missing.
 
 ## Conventions
 
@@ -107,9 +112,11 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    by hand — port the same asserted numbers to a Playwright-driven check so both
    implementations are safe to change. Optionally, add real-photo golden numbers
    from `docs/HISTORY.md` to the opt-in tier.
-2. **Port multi-print alignment (`align_multi()`, see `docs/PIPELINE.md` § 6)
-   to `checleaner.html`.** `checleaner.py` now rotates and centres a multi-print
-   photo when it can; the phone app still just balances and leaves it whole.
+2. **Port multi-print alignment (`align_multi()` + `content_rotation()`, see
+   `docs/PIPELINE.md` § 6) to `checleaner.html`.** `checleaner.py` now levels a
+   multi-print photo and stands it upright from its content; the phone app still
+   just balances and leaves it whole. (Reorientation there would need a JS face
+   detector, e.g. onnxruntime-web with the same YuNet model.)
 3. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge

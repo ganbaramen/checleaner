@@ -28,8 +28,10 @@ import cv2
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
-                        detect_print, warp, orient, build_parser, ASPECT)
+                        detect_print, warp, orient, build_parser, content_rotation,
+                        ASPECT)
 from tools.detect import classify   # the single/single?/multi gate, one copy
 
 
@@ -247,6 +249,61 @@ def test_real_grid_photo_fails_solidity():
         skip("grid reference photo not present")
     d = detect_print(path)
     assert d.solidity < DEFAULTS.min_solidity, f"real grid solidity {d.solidity:.3f} no longer caught"
+
+
+# Multi-print photos that align_multi levels but leaves mis-turned, with the
+# quarter/half turn (in 90-degree CCW units) that stands them upright...
+REAL_REORIENT = {
+    "PXL_20260427_023359428.MP.jpg": 1,   # row of 2 portrait, a quarter turn off
+    "PXL_20260501_015640226.MP.jpg": 1,
+    "PXL_20260501_015731072.MP.jpg": 1,
+    "PXL_20260427_023126095.MP.jpg": 1,   # mixed landscape+portrait, all a quarter off
+    "PXL_20260427_023727013.MP.jpg": 2,   # row of 4 portrait, upside down
+}
+# ...and multi-print photos already upright, which must be left untouched.
+REAL_UPRIGHT = [
+    "PXL_20260427_023252712.MP.jpg",
+    "PXL_20260810_014211016.MP.jpg",
+    "PXL_20260427_022950306.MP.jpg",      # a near-tie the margin rule must protect
+]
+
+
+def test_content_rotation_no_ops_without_a_detector():
+    """The reorientation is optional: with no face model it returns 'no turn'
+    rather than erroring, so a machine that can't load it just gets the older
+    leave-it-level behaviour."""
+    saved = checleaner._FACE_DET
+    checleaner._FACE_DET = None            # force 'load already failed'
+    try:
+        import numpy as _np
+        assert content_rotation(_np.zeros((400, 300, 3), _np.uint8)) == 0
+    finally:
+        checleaner._FACE_DET = saved
+
+
+def test_real_multiprint_reorientation():
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    if checleaner._face_detector() is None:
+        skip("face model unavailable (offline / not cached)")
+    checked = 0
+    for name, want in REAL_REORIENT.items():
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        got = content_rotation(cv2.imread(path))
+        assert got == want, f"{name}: reorient turned {got*90}, want {want*90}"
+    for name in REAL_UPRIGHT:
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        got = content_rotation(cv2.imread(path))
+        assert got == 0, f"{name}: already upright but reorient turned it {got*90}"
+    if checked == 0:
+        skip("none of the reorientation reference photos are present")
 
 
 if __name__ == "__main__":

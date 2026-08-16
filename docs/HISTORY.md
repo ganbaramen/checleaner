@@ -386,6 +386,32 @@ Kept from the exercise: `tools/detect.py`, a detection-only preview that gives
 run()'s single/single?/multi verdict on named files sub-second each, so detection
 geometry can be iterated without grinding the whole batch's colour pass.
 
+## Multi-print frames stood upright from content (2026-08-16)
+
+Five `chekis/main/` frames came out of `align_multi()` level but sideways or
+upside down -- the long-standing "landscape prints" limitation, previously
+filed as unfixable because card geometry can't tell portrait from landscape.
+The fix reads the *content* instead: `content_rotation()` scores each 90° turn
+by face confidence (YuNet) and takes the one that stands the most faces upright.
+See `docs/PIPELINE.md` § 6 for why geometry couldn't and faces can.
+
+Files corrected (turn = 90° CCW units):
+
+| file | layout | turn |
+|---|---|---|
+| PXL_20260427_023359428 | 1 row of 2 portrait | 90° |
+| PXL_20260501_015640226 | 1 row of 3 portrait | 90° |
+| PXL_20260501_015731072 | 1 row of 3 portrait | 90° |
+| PXL_20260427_023126095 | 1 row of 2 landscape + 1 row of 4 portrait | 90° |
+| PXL_20260427_023727013 | 1 row of 4 portrait | 180° |
+
+No regressions: swept all 49 multi/aligned/`single?` frames, exactly these five
+turned, the other 44 (including a 0°-vs-180° near-tie at 1.61 vs 1.82 that the
+1.5× margin protects) were left byte-identical. The turn is recorded in the new
+`reorient` column of `report.csv`. Model is YuNet (~230 KB), cached under
+`~/.cache/checleaner/`; without it the step no-ops and the old leave-it-level
+behaviour returns.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
@@ -396,10 +422,5 @@ geometry can be iterated without grinding the whole batch's colour pass.
 - **Cards running out of frame.** Cannot be cropped; needs a re-shoot.
 - **Backs' long edges.** Almost no paper margin, so film meets desk directly. What
   looks like a bad crop there is usually the card itself.
-- **Landscape prints in `align_multi()` output.** A photo of print(s) whose
-  content is landscape-oriented on the (always-portrait) physical card comes
-  out level and centred but still sideways -- `align_multi()` only rotates
-  the whole frame and has no way to read individual print content. A
-  geometric proxy was tried and rejected (~30% precision); see the
-  2026-08-16 entry above and `docs/PIPELINE.md` § 6. Needs per-print
-  detection to fix properly, not a better frame-level heuristic.
+  (Multi-print frames coming out sideways used to live here too; now fixed by
+  content-based reorientation -- see the 2026-08-16 entry above.)

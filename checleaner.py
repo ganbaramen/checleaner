@@ -13,7 +13,8 @@ desk. For every photo it:
      mini proportions (54 x 86 mm) and rotates it upright,
   5. routes anything it isn't confident about into review/ with a reason.
 
-Photos showing several prints are balanced but left uncropped.
+Photos showing several prints are balanced, levelled, and stood upright from
+their content (faces), but left uncropped.
 
 Usage:
     python3 checleaner.py PHOTOS/                 # -> PHOTOS/balanced, PHOTOS/review
@@ -520,6 +521,92 @@ def orient(crop_bgr: np.ndarray):
     return crop_bgr, ratio
 
 
+# ------------------------------------------ multi-print content orientation
+
+# align_multi() gets a multi-print photo level but not upright: mod-90 tilt has
+# no notion of up-vs-down or a quarter turn, and the frame carries no single
+# signature border to read the way orient() reads one card's. The content does
+# carry it, though -- these are photos of people, and the turn that stands the
+# most faces upright is the way up. A small face detector supplies that; it is
+# optional and cached, and if it can't be loaded the frame is just left as
+# align_multi left it (the pre-face behaviour), never an error.
+
+_FACE_MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
+                   "face_detection_yunet/face_detection_yunet_2023mar.onnx")
+_FACE_MODEL_NAME = "face_detection_yunet_2023mar.onnx"
+_FACE_DET = "unset"   # cached detector, or None once a load attempt has failed
+
+
+def _face_model_path() -> str | None:
+    """The YuNet model file, fetched to a user cache on first use. $CHEKI_FACE_MODEL
+    overrides the location; a failed download disables the feature, not the run."""
+    env = os.environ.get("CHEKI_FACE_MODEL")
+    if env:
+        return env if os.path.exists(env) else None
+    cache = os.path.join(os.path.expanduser("~"), ".cache", "checleaner")
+    path = os.path.join(cache, _FACE_MODEL_NAME)
+    if os.path.exists(path):
+        return path
+    try:
+        import urllib.request
+        os.makedirs(cache, exist_ok=True)
+        print(f"fetching face-orientation model (~230 KB) -> {path}", flush=True)
+        urllib.request.urlretrieve(_FACE_MODEL_URL, path)
+        return path
+    except Exception as exc:                          # offline, blocked, etc.
+        print(f"  multi-print reorientation off (no model: {exc})", flush=True)
+        return None
+
+
+def _face_detector():
+    """Lazily build the detector once; return None (and stay None) if it can't be."""
+    global _FACE_DET
+    if _FACE_DET != "unset":
+        return _FACE_DET
+    _FACE_DET = None
+    if not hasattr(cv2, "FaceDetectorYN"):
+        return None
+    path = _face_model_path()
+    if not path:
+        return None
+    try:
+        _FACE_DET = cv2.FaceDetectorYN.create(path, "", (320, 320), 0.6, 0.3, 5000)
+    except Exception as exc:                          # pragma: no cover
+        print(f"  multi-print reorientation off (model load failed: {exc})", flush=True)
+        _FACE_DET = None
+    return _FACE_DET
+
+
+def content_rotation(img: np.ndarray, downscale: int = 1400,
+                     min_score: float = 1.2, margin: float = 1.5) -> int:
+    """Number of 90-degree CCW turns that stand a multi-print frame upright (0-3).
+
+    Each turn is scored by summed face confidence, but a turn only wins over
+    leaving the frame alone when the frame as-is holds little face evidence *and*
+    the turn is decisively better (min_score / margin). That asymmetry is
+    deliberate: a frame already upright, or holding no faces at all, must be left
+    exactly as it is -- the cost of missing a rotation is one review, the cost of
+    inventing one is corrupting a photo that was already right.
+    """
+    det = _face_detector()
+    if det is None:
+        return 0
+    h, w = img.shape[:2]
+    sc = downscale / max(h, w)
+    small = cv2.resize(img, (int(w * sc), int(h * sc))) if sc < 1 else img
+
+    def score(im):
+        det.setInputSize((im.shape[1], im.shape[0]))
+        _, faces = det.detect(im)
+        return 0.0 if faces is None else float(faces[:, -1].sum())
+
+    s = [score(np.ascontiguousarray(np.rot90(small, k))) for k in range(4)]
+    best = int(np.argmax(s))
+    if best != 0 and s[best] >= min_score and s[best] > margin * s[0]:
+        return best
+    return 0
+
+
 # ------------------------------------------------------------------ the driver
 
 @dataclass
@@ -622,7 +709,7 @@ def run(args) -> int:
                 for flag in (f.strip() for f in old.get("flags", "").split(";")):
                     if flag and flag not in r.flags:
                         r.flags.append(flag)
-                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n"):
+                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n", "reorient"):
                     v = old.get(k)
                     if v not in (None, ""):
                         r.stats[k] = v
@@ -680,6 +767,14 @@ def run(args) -> int:
                         img, align_stats = aligned
                         r.kind = "aligned"
                         r.stats.update(align_stats)
+
+                # align_multi only levels; stand the frame upright from its
+                # content (a quarter or half turn) so it isn't left sideways
+                if not args.no_reorient:
+                    k = content_rotation(img)
+                    if k:
+                        img = np.ascontiguousarray(np.rot90(img, k))
+                        r.stats["reorient"] = k * 90
         else:
             r.kind = "nocrop"
 
@@ -732,7 +827,7 @@ def _write_report(path, files, results):
         # never drift out of sync with where the file actually landed
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
                      "clipped_pct", "aspect", "fill", "border_ratio",
-                     "align_tilt", "align_n", "flags"])
+                     "align_tilt", "align_n", "reorient", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
@@ -740,7 +835,8 @@ def _write_report(path, files, results):
             wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
                          s.get("gain"), s.get("clipped_pct"), s.get("aspect"),
                          s.get("fill"), s.get("border_ratio"),
-                         s.get("align_tilt"), s.get("align_n"), "; ".join(r.flags)])
+                         s.get("align_tilt"), s.get("align_n"), s.get("reorient"),
+                         "; ".join(r.flags)])
 
 
 # plain-English gloss per flag prefix, for review/report.txt -- the flag
@@ -830,6 +926,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--width", type=int, default=1800, help="output width for crops")
     p.add_argument("--quality", type=int, default=96, help="JPEG quality")
     p.add_argument("--no-crop", action="store_true", help="colour-balance only")
+    p.add_argument("--no-reorient", action="store_true",
+                   help="skip standing multi-print photos upright from their "
+                        "content (needs the cached YuNet face model)")
     p.add_argument("--dry-run", action="store_true", help="measure and report, write nothing")
     p.add_argument("--force", action="store_true",
                    help="reprocess every file, even ones already in balanced/ or review/ "
