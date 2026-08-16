@@ -266,6 +266,55 @@ new file processed only that file, confirmed by timing.
 
 ---
 
+## Orientation bugs found while reviewing a fresh batch (2026-08-16)
+
+User caught 6 misoriented files in `chekis/main/` across two categories.
+
+**Real bug, fixed:** `orient()`'s row profile was a *mean* across the row,
+which a strong partial-width edge inside the photo can win even though it has
+nothing to do with the border -- found on `20260427_022950306`, where the
+"bottom" edge it locked onto was the boundary between a subject's pale face
+and dark hair, not the paper transition. That transition was real and
+full-width, just lower-contrast than the face/hair edge at that particular
+photo, so the *mean* profile missed it while a 20th-percentile profile found
+it cleanly (confirmed by cropping the row band and looking directly at it).
+Confidently wrong too: border ratio 2.07, comfortably above the 1.6 trust
+threshold, so this wasn't something the existing uncertainty flag would have
+caught. Fixed in `orient()`; see `docs/PIPELINE.md` § 5. Regression-tested
+against all 12 known-good singles in `chekis/rancheki/` -- identical flip
+decision on every one, so nothing that worked before changed.
+
+**Investigated, not fixed:** 3 more files came out level and centred
+(`align_multi()` worked correctly) but still sideways, because the *prints
+themselves* are landscape-oriented content on portrait-shaped physical cards
+-- confirmed by looking at the raw source photos, where the cards are already
+sideways before any processing touches them. No part of the pipeline has ever
+attempted to detect this, since it requires reading print content, not card
+geometry, and `align_multi()` only rotates the whole frame.
+
+Tried a geometric proxy anyway: a merged blob's aspect ratio, combined with
+whether its long edge ended up vertical or horizontal, can in principle tell
+"K landscape cards stacked" apart from "K portrait cards in a row" (they
+share the identical aspect otherwise). Matched all 3 known-sideways files.
+Then swept every multi/aligned file in the folder and it also fired on two
+correctly-oriented grids of 10 and 13 cards -- their overall aspect happened
+to land near the same `k=2` ratio for reasons that have nothing to do with
+any individual card's orientation. ~30% precision (3 of 10 flagged files were
+real). Not shipped, not even as a review flag: a flag that's wrong 7 times
+out of 10 gets ignored, which is worse than no flag. Full writeup in
+`docs/PIPELINE.md` § 6, so this isn't re-attempted the same way without
+knowing why it doesn't work. The 2 remaining near-miss files the user flagged
+were never processed for orientation at all -- `single?` output is always
+just the balanced whole frame, by design, so their sideways/upside-down
+appearance is simply how the phone captured them.
+
+Actually fixing the landscape-print case needs per-print detection (splitting
+merged blobs into individual cards, next steps item 3 in `CLAUDE.md`) so each
+print's own content -- not the merged group's incidental shape -- can be
+reasoned about.
+
+---
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
@@ -276,3 +325,10 @@ new file processed only that file, confirmed by timing.
 - **Cards running out of frame.** Cannot be cropped; needs a re-shoot.
 - **Backs' long edges.** Almost no paper margin, so film meets desk directly. What
   looks like a bad crop there is usually the card itself.
+- **Landscape prints in `align_multi()` output.** A photo of print(s) whose
+  content is landscape-oriented on the (always-portrait) physical card comes
+  out level and centred but still sideways -- `align_multi()` only rotates
+  the whole frame and has no way to read individual print content. A
+  geometric proxy was tried and rejected (~30% precision); see the
+  2026-08-16 entry above and `docs/PIPELINE.md` § 6. Needs per-print
+  detection to fix properly, not a better frame-level heuristic.

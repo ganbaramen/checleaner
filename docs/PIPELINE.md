@@ -157,6 +157,19 @@ Two brightness-based attempts failed first, both instructive:
 Edges have neither problem. The window boundary is always a hard full-width line
 regardless of what is in the picture or written on the border.
 
+**The row profile is a low percentile across the row, not the mean.** Found via
+a genuinely upside-down output with a *confident* wrong border ratio (2.07, well
+above the 1.6 trust threshold): a mean row profile can be won by a strong but
+partial-width edge inside the photo itself — here, a pale face against dark hair
+— which has nothing to do with the border and can out-score the true transition
+if the photo's own content is higher-contrast than the border edge at that row.
+The 20th percentile across the row only scores high where the gradient is strong
+almost everywhere across it, which a same-width content edge can't fake but the
+genuine full-width border transition always satisfies. Verified against the true
+edge by cropping and looking directly at the row it lands on, and re-verified
+against all 12 known-good singles in `chekis/rancheki/` — identical flip decision
+on every one, ratios shifting by hundredths.
+
 ## 6. Align multi-print photos (`checleaner.py` only, not yet ported)
 
 A multi-print photo isn't cropped to a card shape, but it can still be
@@ -189,6 +202,30 @@ they still land inside the original frame. This matters: these photos are
 occasionally shot with prints laid out diagonally with barely any desk
 margin (see `docs/HISTORY.md`), where a centred crop simply isn't possible
 without padding that isn't there.
+
+### What alignment cannot fix: landscape prints
+
+`align_multi()` only rotates and crops the *whole frame*; it never touches an
+individual print. That's fine for the frame-level tilt, but it means a photo
+where the prints themselves are lying on their side — landscape content on
+the (always-portrait) physical card — comes out level and centred but still
+sideways, because nothing in this step looks at print content, only card
+geometry, and card geometry alone can't tell portrait from landscape: two
+landscape cards stacked and two portrait cards side by side land on the
+*identical* merged aspect ratio, `86/54 × 2`.
+
+Tried disambiguating this with the blob's long axis: a stack of K cards in
+their tall direction should be vertical at `(86/54)·K`, a row of K upright
+cards horizontal at `(54/86)·K`; landing on either formula with the *other*
+edge direction would mean the cards are on their side. Verified against 3
+known-sideways files — matched all 3 — then swept every multi/aligned file in
+`chekis/main/` and found it also fired on grids of 10–13 correctly-oriented
+cards, coincidentally landing near the same `k=2` ratio for reasons unrelated
+to any card's orientation. ~30% precision on real data. Abandoned rather than
+shipped even as a review flag — a flag wrong 7 times out of 10 trains you to
+ignore it, which defeats the point. See `docs/HISTORY.md` for the numbers.
+No fix currently exists for this; it needs per-print detection (next steps
+item 3 in `CLAUDE.md`), not a better frame-level heuristic.
 
 ---
 

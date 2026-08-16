@@ -471,13 +471,23 @@ def orient(crop_bgr: np.ndarray):
     signature, which is dark ink sitting in the border. The window boundary, by
     contrast, is always a hard full-width horizontal edge.
 
+    That full-width property is why the row profile is a low percentile across
+    the row, not the mean: a mean can be won by a strong but partial-width edge
+    inside the photo (a pale face against dark hair, say), which has nothing to
+    do with the border and can out-score the true transition if the photo's own
+    content is higher-contrast than the paper edge at that spot. A percentile
+    close to the row's minimum only scores high where the gradient is strong
+    almost everywhere across the row, which a same-width content edge can't
+    fake but the genuine full-width border transition always satisfies.
+
     Returns (image, ratio). Ratio is wide gap / narrow gap; on a real instax mini
     it lands near 2.1. Close to 1 means the two ends looked alike and the call is
     untrustworthy.
     """
     gray = cv2.cvtColor(cv2.GaussianBlur(crop_bgr, (5, 5), 0), cv2.COLOR_BGR2GRAY).astype(np.float32)
     H, W = gray.shape
-    prof = np.abs(cv2.Scharr(gray, cv2.CV_32F, 0, 1))[:, int(0.2 * W):int(0.8 * W)].mean(axis=1)
+    band = np.abs(cv2.Scharr(gray, cv2.CV_32F, 0, 1))[:, int(0.2 * W):int(0.8 * W)]
+    prof = np.percentile(band, 20, axis=1)
     m = int(0.03 * H)
     prof[:m] = 0
     prof[-m:] = 0                                     # ignore the crop's own soft rim
