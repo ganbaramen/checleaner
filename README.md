@@ -15,8 +15,8 @@ Two implementations of the same pipeline:
 
 ```bash
 pip install numpy opencv-python pillow scipy piexif
-python3 checleaner.py FOLDER/            # -> FOLDER/balanced, FOLDER/review, FOLDER/report.csv
-python3 checleaner.py FOLDER/ --dry-run  # measure and report, write nothing
+python3 checleaner.py chekis/main/            # -> balanced, review, report.csv inside it
+python3 checleaner.py chekis/main/ --dry-run  # measure and report, write nothing
 ```
 
 ~10 s per photo. Source photos are never modified in place — output goes to
@@ -32,7 +32,9 @@ checleaner/
   checleaner.html        single-file phone app, same pipeline ported to JS
   docs/PIPELINE.md       the algorithm, why each step is the way it is
   docs/HISTORY.md        every batch processed, with before/after measurements
-  <batch folders>/       source photos, each with a balanced/ subfolder of output
+  chekis/                source photos, gitignored — never committed
+    main/                 most photos land here
+    <other>/               ad hoc structure for a specific shoot
 ```
 
 ## Invariants

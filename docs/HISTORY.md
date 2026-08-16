@@ -16,7 +16,10 @@ are *not* comparable between folders.
 
 ---
 
-## chekis/ — main collection (26 files, dark walnut desk)
+## chekis/main/ — main collection (26 files, dark walnut desk)
+
+(Ran at the time as the top-level `chekis/`, before that name was reused for
+the photo-storage root that now holds `main/` plus the ad hoc batches below.)
 
 Built up over several runs: 20 files, then 4 more, then 2 re-done.
 
