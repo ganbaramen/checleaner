@@ -377,192 +377,6 @@ def align_multi(img: np.ndarray, dets: list[Detection]):
     return crop, dict(align_tilt=round(angle, 2), align_n=len(dets))
 
 
-def _window_holes(labels: np.ndarray, idx: int) -> list[tuple[int, int, int, int]]:
-    """Enclosed 'holes' in a merged paper-frame blob's mask: mostly one
-    print's own photo content per hole. Overlapping prints hide the seam
-    between their white borders (white paper on white paper leaves no visible
-    edge), but a print's edge crossing the *darker* photo content of a print
-    beneath it does leave a real, visible edge -- so this works from the
-    content each print reveals of itself, not from tracing the mostly-invisible
-    card edges directly. Boxes are in the blob's own axis-aligned bbox-local
-    coordinates (not full-res, not rotated).
-    """
-    comp = (labels == idx).astype(np.uint8)
-    ys, xs = np.where(comp)
-    y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
-    sub = comp[y0:y1 + 1, x0:x1 + 1]
-    notpaper = (1 - sub).astype(np.uint8)
-    # pad with a guaranteed-not-paper border so flood fill from a known
-    # exterior seed can separate background (reachable from outside) from
-    # true enclosed holes (windows) -- (0,0) of the bbox itself is not a safe
-    # seed, since the blob can extend right up to its own bbox corner
-    padded = np.pad(notpaper, 1, constant_values=1)
-    ffmask = np.zeros((padded.shape[0] + 2, padded.shape[1] + 2), np.uint8)
-    filled = padded.copy()
-    cv2.floodFill(filled, ffmask, (0, 0), 2)
-    exterior = filled == 2
-    holes = (((padded == 1) & ~exterior)[1:-1, 1:-1]).astype(np.uint8) * 255
-    n, _, stats, _ = cv2.connectedComponentsWithStats(holes, 8)
-    area_min = 0.005 * sub.shape[0] * sub.shape[1]
-    return [tuple(int(v) for v in stats[i][:4]) for i in range(1, n) if stats[i][4] > area_min]
-
-
-def _cluster_windows(boxes: list[tuple[int, int, int, int]], axis: int, thresh: float = 0.3):
-    """Union window-hole fragments that overlap along `axis` (0=x, 1=y).
-
-    A bright face can be bright and near-neutral enough to pass the same
-    paper-frame test as the border itself, splitting one print's window into
-    disconnected pieces (see docs/HISTORY.md). Fragments belonging to the
-    same print share roughly the same extent along the axis *perpendicular*
-    to the fan, so union-find on that overlap reunites them.
-    """
-    def overlap(a, b):
-        a0, a1 = a[axis], a[axis] + a[2 + axis]
-        b0, b1 = b[axis], b[axis] + b[2 + axis]
-        inter = max(0, min(a1, b1) - max(a0, b0))
-        return inter / min(a[2 + axis], b[2 + axis])
-
-    parent = list(range(len(boxes)))
-
-    def find(i):
-        while parent[i] != i:
-            i = parent[i]
-        return i
-
-    for i in range(len(boxes)):
-        for j in range(i + 1, len(boxes)):
-            if overlap(boxes[i], boxes[j]) > thresh:
-                pi, pj = find(i), find(j)
-                if pi != pj:
-                    parent[pi] = pj
-    groups: dict[int, list] = {}
-    for i, b in enumerate(boxes):
-        groups.setdefault(find(i), []).append(b)
-    merged = []
-    for g in groups.values():
-        x0 = min(b[0] for b in g)
-        y0 = min(b[1] for b in g)
-        x1 = max(b[0] + b[2] for b in g)
-        y1 = max(b[1] + b[3] for b in g)
-        merged.append((x0, y0, x1 - x0, y1 - y0))
-    return merged
-
-
-def _split_hypothesis(box: np.ndarray, boxes, bw: int, bh: int,
-                       horizontal_fan: bool, portrait: bool) -> list[np.ndarray] | None:
-    """Try reconstructing N card quads assuming a single row/column fan with
-    the given individual-card orientation. Returns None if the evidence
-    (window cluster count/spacing) doesn't cleanly support that hypothesis.
-    """
-    short_len = bh if horizontal_fan else bw
-    if horizontal_fan:
-        card_h = short_len if portrait else short_len / ASPECT
-        card_w = card_h / ASPECT if portrait else short_len
-    else:
-        card_w = short_len if portrait else short_len / ASPECT
-        card_h = card_w * ASPECT if portrait else short_len
-
-    fan_axis = 0 if horizontal_fan else 1
-    card_span = card_w if horizontal_fan else card_h
-    span = bw if horizontal_fan else bh
-
-    clusters = _cluster_windows(boxes, fan_axis)
-    # a real window is a meaningful fraction of the card's own (perpendicular
-    # to the fan) span -- a thin sliver in the gap between two cards (shadow,
-    # background peeking through) clusters on its own but is too narrow
-    min_span = 0.35 * card_span
-    clusters = [c for c in clusters if c[2 + fan_axis] >= min_span]
-    n = len(clusters)
-    if n < 2:
-        return None
-
-    clusters.sort(key=lambda c: c[fan_axis] + c[2 + fan_axis] / 2)
-    centers = [c[fan_axis] + c[2 + fan_axis] / 2 for c in clusters]
-    gaps = [centers[i + 1] - centers[i] for i in range(n - 1)]
-    if any(g <= 0.1 * card_span for g in gaps):
-        return None  # not cleanly ordered/spaced -- doesn't look like a fan
-    if centers[0] < 0.25 * card_span or centers[-1] > span - 0.25 * card_span:
-        return None  # outermost window isn't plausibly near the blob's own edge
-
-    # anchor each card on its OWN window cluster centre (a window sits
-    # centred on its card) rather than an assumed uniform grid -- real
-    # overlap between cards is never perfectly even, and a rigid grid drifts
-    # by the accumulated error. The two OUTERMOST edges use the blob's own
-    # true boundary instead of a guess, since nothing occludes them further --
-    # but only nearly: the blob boundary itself has a little slop (mask
-    # dilation from the paper-frame closing/opening), and unlike a single
-    # detected card this edge never goes through trim_desk()'s hunt for
-    # real desk to eat into, since there usually isn't any -- what's at risk
-    # here is the print's OWN content (a bright background in the photo, say)
-    # sitting close enough to register as a false "desk" residual later. A
-    # small margin costs a sliver of the card's own border; bleeding print
-    # content to the very edge costs a spurious review flag on a fine crop.
-    safety, edge_safety = 0.88, 0.97
-    shrink = card_span * (1 - safety) / 2
-    edge_shrink = card_span * (1 - edge_safety) / 2
-    quads = []
-    for i, center in enumerate(centers):
-        lo, hi = center - card_span / 2, center + card_span / 2
-        if i == 0:
-            lo, hi = edge_shrink, card_span - shrink
-        elif i == n - 1:
-            lo, hi = span - card_span + shrink, span - edge_shrink
-        else:
-            lo, hi = lo + shrink, hi - shrink
-        t0, t1 = lo / span, hi / span
-        # interpolate along the blob's own (possibly tilted) rectangle edges
-        # using fan-position fractions -- correct regardless of tilt, unlike
-        # working from an axis-aligned bounding box
-        pa0, pa1 = box[0] + t0 * (box[1] - box[0]), box[0] + t1 * (box[1] - box[0])
-        pb0, pb1 = box[3] + t0 * (box[2] - box[3]), box[3] + t1 * (box[2] - box[3])
-        quads.append(np.array([pa0, pa1, pb1, pb0], np.float32))
-    return quads
-
-
-def split_prints(path: str, size: int = 1400) -> list[np.ndarray] | None:
-    """Try to split several overlapping prints laid in a single row or
-    column into separate card quads, one per print.
-
-    Deliberately narrow: only a single fan axis, only a consistent per-print
-    orientation (all portrait or all landscape). Real photos also show 2D
-    grids, mixed orientations, and prints overlapping in both directions at
-    once -- returns None rather than force a bad split on any of those,
-    falling back to align_multi() or leaving the photo whole. Both the fan
-    direction *and* the individual card orientation are picked by trying the
-    hypotheses that fit the evidence (detected window positions), not by
-    guessing from blob geometry alone: two landscape cards stacked and two
-    portrait cards side by side can share the exact same merged aspect ratio,
-    so aspect alone can't tell them apart (see docs/HISTORY.md, the abandoned
-    "maybe sideways" heuristic, for why guessing this from geometry alone
-    doesn't work). See docs/PIPELINE.md for the full method.
-    """
-    seg = _segment_prints(path, size)
-    if seg is None or not seg["big"]:
-        return None
-    idx = max(seg["big"], key=lambda i: seg["stats"][i, cv2.CC_STAT_AREA])
-    d = _blob_detection(seg["labels"], idx, seg["sc"])
-    if d is None:
-        return None
-
-    q = d.quad * seg["sc"]  # analysis-scale, to match the window-hole coordinates
-    long_vec = q[1] - q[0]
-    angle = np.degrees(np.arctan2(long_vec[1], long_vec[0])) % 180
-    horizontal_fan = angle < 45 or angle > 135
-
-    boxes = _window_holes(seg["labels"], idx)
-    comp = seg["labels"] == idx
-    ys, xs = np.where(comp)
-    bw, bh = int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)
-
-    results = [quads for portrait in (True, False)
-               if (quads := _split_hypothesis(d.quad, boxes, bw, bh, horizontal_fan, portrait))
-               is not None]
-    # exactly one hypothesis validating is the signal that it's the right
-    # one; both (or neither) validating means real ambiguity, and guessing
-    # wrong here is worse than not splitting at all
-    return results[0] if len(results) == 1 else None
-
-
 def warp(img: np.ndarray, quad: np.ndarray, out_w: int) -> np.ndarray:
     """Perspective-correct the quad onto a portrait canvas of exact instax shape."""
     out_h = int(round(out_w * ASPECT))
@@ -780,81 +594,43 @@ def run(args) -> int:
     # output if reprocessed -- the pipeline is deterministic -- so redoing it
     # is pure waste. Skip by default and reuse the prior report.csv row for
     # its pass-2 stats/flags; --force to reprocess everything regardless
-    # (e.g. after an algorithm change that should benefit every file). A
-    # split source produces several numbered outputs (stem_1.ext, stem_2.ext,
-    # ...) instead of one, so "already done" has to check for those too.
+    # (e.g. after an algorithm change that should benefit every file).
     prior = {} if args.force else _read_prior_report(os.path.join(out_root, "report.csv"))
-    good_names = set(os.listdir(good_dir))
-    review_names = set(os.listdir(review_dir))
-
-    def existing_outputs(stem, ext, max_parts=20):
-        plain = stem + ext
-        if plain in good_names:
-            return [(plain, "balanced")]
-        if plain in review_names:
-            return [(plain, "review")]
-        found = []
-        for i in range(1, max_parts + 1):
-            part = f"{stem}_{i}{ext}"
-            if part in good_names:
-                found.append((part, "balanced"))
-            elif part in review_names:
-                found.append((part, "review"))
-            else:
-                break  # assumes split parts are contiguous from 1
-        return found
-
-    def cleanup_stale_shape(stem, ext, expected_names):
-        # a reprocess (--force, or a code/algorithm change) can reclassify a
-        # file, or flip it between a single output and a split one -- drop
-        # whichever old files don't match its current shape so nothing is
-        # duplicated or orphaned across balanced/ and review/
-        candidates = {stem + ext} | {f"{stem}_{i}{ext}" for i in range(1, 21)}
-        for stale_name in candidates - set(expected_names):
-            for d in (good_dir, review_dir):
-                p = os.path.join(d, stale_name)
-                if os.path.exists(p):
-                    os.remove(p)
-
-    def finish(r, img, out_name):
-        dest_dir = review_dir if r.flags else good_dir
-        dest = os.path.join(dest_dir, out_name)
-        cv2.imwrite(dest, img, [cv2.IMWRITE_JPEG_QUALITY, args.quality])
-        _copy_exif(path, dest, img.shape[1], img.shape[0])
-        outputs[out_name] = r
-        note = "; ".join(r.flags) if r.flags else "ok"
-        print(f"  {out_name:<34} {r.kind:<7} -> {os.path.basename(dest_dir):<8} {note}", flush=True)
-
-    outputs: dict[str, Result] = {}
+    already_done = {}
+    for name in files:
+        in_good = os.path.exists(os.path.join(good_dir, name))
+        in_review = os.path.exists(os.path.join(review_dir, name))
+        if in_good and not in_review:
+            already_done[name] = "balanced"
+        elif in_review and not in_good:
+            already_done[name] = "review"
+        # else: present in neither (normal) or both (stale duplicate from
+        # before a file got reclassified) -- either way, not cleanly
+        # resolved, so fall through and reprocess it. A duplicate gets
+        # cleaned up as a side effect of the stale-copy removal below.
     n_skipped = 0
 
     # -- pass 2: apply, crop, orient ---------------------------------------
     for name in files:
-        stem, ext = os.path.splitext(name)
-        r0 = results[name]
+        r = results[name]
 
-        if not args.force:
-            existing = existing_outputs(stem, ext)
-            if existing:
-                n_skipped += 1
-                for fname, dest_label in existing:
-                    old = prior.get(fname)
-                    ro = Result(fname, kind=r0.kind, flags=list(r0.flags), stats=dict(r0.stats))
-                    if old:
-                        ro.kind = old.get("kind") or ro.kind
-                        for flag in (f.strip() for f in old.get("flags", "").split(";")):
-                            if flag and flag not in ro.flags:
-                                ro.flags.append(flag)
-                        for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n"):
-                            v = old.get(k)
-                            if v not in (None, ""):
-                                ro.stats[k] = v
-                    else:
-                        ro.kind = "skipped"
-                    outputs[fname] = ro
-                    print(f"  {fname:<34} {ro.kind:<7} -> {dest_label:<8} "
-                          "(unchanged, already processed)", flush=True)
-                continue
+        if not args.force and name in already_done:
+            n_skipped += 1
+            old = prior.get(name)
+            if old:
+                r.kind = old.get("kind") or r.kind
+                for flag in (f.strip() for f in old.get("flags", "").split(";")):
+                    if flag and flag not in r.flags:
+                        r.flags.append(flag)
+                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n"):
+                    v = old.get(k)
+                    if v not in (None, ""):
+                        r.stats[k] = v
+            else:
+                r.kind = "skipped"
+            print(f"  {name:<34} {r.kind:<7} -> {already_done[name]:<8} "
+                  "(unchanged, already processed)", flush=True)
+            continue
 
         path = os.path.join(src, name)
         gain, off, desk = solved[name]
@@ -864,85 +640,68 @@ def run(args) -> int:
         rgb8 = np.asarray(Image.open(path).convert("RGB"))
         img = cv2.cvtColor(apply(rgb8, gain, off, gamma, white_t, black_t), cv2.COLOR_RGB2BGR)
 
-        if args.no_crop:
-            r0.kind = "nocrop"
-            cleanup_stale_shape(stem, ext, [name])
-            finish(r0, img, name)
-            continue
-
-        det = detect_print(path)
-        single = (det.quad is not None and det.n_blobs == 1
-                  and args.aspect_lo <= det.aspect <= args.aspect_hi
-                  and det.fill >= args.min_fill
-                  and det.solidity >= args.min_solidity)
-        if single:
-            r0.stats.update(aspect=round(det.aspect, 3), fill=round(det.fill, 3))
-            quad, insets = trim_desk(img, det.quad)
-            crop = warp(img, quad, args.width)
-            crop, ratio = orient(crop)
-            r0.stats.update(trim=insets, border_ratio=round(ratio, 2))
-
-            # did the trim actually clear the desk?
-            left = residual_desk(crop)
-            worst = max(left.values())
-            if worst > args.max_residual:
-                r0.flags.append(f"desk still on {max(left, key=left.get)} edge (~{worst}px)")
-            if ratio < args.min_border_ratio:
-                r0.flags.append(f"orientation uncertain (border ratio {ratio:.2f})")
-            cleanup_stale_shape(stem, ext, [name])
-            finish(r0, crop, name)
-            continue
-
-        # Several prints, or one blob whose shape is nowhere near a single
-        # card (two prints side by side merge into one wide blob): that's an
-        # ordinary multi-print shot. Only a near-miss — roughly card-shaped
-        # but failing the tight test — is worth a human look, because that's
-        # what a bad fit looks like; anything else, try to split it into
-        # separate per-print crops, falling back to a single aligned (or
-        # plain balanced) frame when that isn't confident enough.
-        near_miss = (det.quad is not None and det.n_blobs == 1
-                     and 1.40 <= det.aspect <= 1.90)
-        if near_miss:
-            r0.kind = "single?"
-            r0.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "
-                             f"solidity {det.solidity:.3f})")
-            cleanup_stale_shape(stem, ext, [name])
-            finish(r0, img, name)
-            continue
-
-        quads = split_prints(path)
-        if quads is not None:
-            part_names = [f"{stem}_{i}{ext}" for i in range(1, len(quads) + 1)]
-            cleanup_stale_shape(stem, ext, part_names)
-            for part_name, quad in zip(part_names, quads):
-                ri = Result(part_name, kind="split", flags=list(r0.flags), stats=dict(r0.stats))
-                tquad, insets = trim_desk(img, quad)
-                crop = warp(img, tquad, args.width)
+        if not args.no_crop:
+            det = detect_print(path)
+            single = (det.quad is not None and det.n_blobs == 1
+                      and args.aspect_lo <= det.aspect <= args.aspect_hi
+                      and det.fill >= args.min_fill
+                      and det.solidity >= args.min_solidity)
+            if single:
+                r.stats.update(aspect=round(det.aspect, 3), fill=round(det.fill, 3))
+                quad, insets = trim_desk(img, det.quad)
+                crop = warp(img, quad, args.width)
                 crop, ratio = orient(crop)
-                ri.stats.update(border_ratio=round(ratio, 2))
+                r.stats.update(trim=insets, border_ratio=round(ratio, 2))
+
+                # did the trim actually clear the desk?
                 left = residual_desk(crop)
                 worst = max(left.values())
                 if worst > args.max_residual:
-                    ri.flags.append(f"desk still on {max(left, key=left.get)} edge (~{worst}px)")
+                    r.flags.append(f"desk still on {max(left, key=left.get)} edge (~{worst}px)")
                 if ratio < args.min_border_ratio:
-                    ri.flags.append(f"orientation uncertain (border ratio {ratio:.2f})")
-                finish(ri, crop, part_name)
-            continue
+                    r.flags.append(f"orientation uncertain (border ratio {ratio:.2f})")
+                img = crop
+            else:
+                # Several prints, or one blob whose shape is nowhere near a single
+                # card (two prints side by side merge into one wide blob): that's an
+                # ordinary multi-print shot, so balance it and leave it whole.
+                # Only a near-miss — roughly card-shaped but failing the tight test —
+                # is worth a human look, because that's what a bad fit looks like.
+                r.kind = "multi"
+                near_miss = (det.quad is not None and det.n_blobs == 1
+                             and 1.40 <= det.aspect <= 1.90)
+                if near_miss:
+                    r.kind = "single?"
+                    r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "
+                                   f"solidity {det.solidity:.3f})")
+                else:
+                    aligned = align_multi(img, detect_all_prints(path))
+                    if aligned is not None:
+                        img, align_stats = aligned
+                        r.kind = "aligned"
+                        r.stats.update(align_stats)
+        else:
+            r.kind = "nocrop"
 
-        r0.kind = "multi"
-        aligned = align_multi(img, detect_all_prints(path))
-        if aligned is not None:
-            img, align_stats = aligned
-            r0.kind = "aligned"
-            r0.stats.update(align_stats)
-        cleanup_stale_shape(stem, ext, [name])
-        finish(r0, img, name)
+        dest_dir = review_dir if r.flags else good_dir
+        # a reprocess (--force, or a code change) can reclassify a file --
+        # drop any stale copy left in the other directory so it isn't
+        # duplicated across both
+        stale = os.path.join(good_dir if dest_dir is review_dir else review_dir, name)
+        if os.path.exists(stale):
+            os.remove(stale)
+        dest = os.path.join(dest_dir, name)
+        cv2.imwrite(dest, img, [cv2.IMWRITE_JPEG_QUALITY, args.quality])
+        _copy_exif(path, dest, img.shape[1], img.shape[0])
 
-    _write_report(os.path.join(out_root, "report.csv"), outputs)
-    _write_review_notes(review_dir, outputs)
-    n_review = sum(1 for r in outputs.values() if r.flags)
+        note = "; ".join(r.flags) if r.flags else "ok"
+        print(f"  {name:<34} {r.kind:<7} -> {os.path.basename(dest_dir):<8} {note}", flush=True)
+
+    _write_report(os.path.join(out_root, "report.csv"), files, results)
+    _write_review_notes(review_dir, files, results)
+    n_review = sum(1 for r in results.values() if r.flags)
     skip_note = f" ({n_skipped} unchanged, skipped)" if n_skipped else ""
-    print(f"\n{len(outputs) - n_review} in balanced/, {n_review} in review/{skip_note}")
+    print(f"\n{len(files) - n_review} in balanced/, {n_review} in review/{skip_note}")
     print(f"report: {os.path.join(out_root, 'report.csv')}")
     if n_review:
         print(f"review notes: {os.path.join(review_dir, 'report.txt')}")
@@ -966,9 +725,7 @@ def _copy_exif(src, dest, w, h):
         pass                                          # EXIF is nice to have, not essential
 
 
-def _write_report(path, outputs):
-    """`outputs` is keyed by output filename, not source filename -- a split
-    source contributes one row per part, not one row for the whole source."""
+def _write_report(path, files, results):
     with open(path, "w", newline="") as fh:
         wr = csv.writer(fh)
         # dest is derived (review iff flags), not tracked separately, so it can
@@ -976,8 +733,8 @@ def _write_report(path, outputs):
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
                      "clipped_pct", "aspect", "fill", "border_ratio",
                      "align_tilt", "align_n", "flags"])
-        for name in sorted(outputs):
-            r = outputs[name]
+        for name in files:
+            r = results[name]
             s = r.stats
             dest = "review" if r.flags else "balanced"
             wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
@@ -1033,12 +790,12 @@ def _read_prior_report(path):
         return {}
 
 
-def _write_review_notes(review_dir, outputs):
+def _write_review_notes(review_dir, files, results):
     """Plain-text summary dropped in review/ itself, next to the photos it
     describes, so what needs a look is readable without cross-referencing
     report.csv or console output -- which matters when a run is driven by an
     agent and nobody's watching stdout live."""
-    flagged = [(name, outputs[name]) for name in sorted(outputs) if outputs[name].flags]
+    flagged = [(name, results[name]) for name in files if results[name].flags]
     with open(os.path.join(review_dir, "report.txt"), "w") as fh:
         if not flagged:
             fh.write("Nothing needs review.\n")
