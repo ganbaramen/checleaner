@@ -1,4 +1,4 @@
-# CLAUDE.md — cheki photo cleanup
+# CLAUDE.md — checleaner
 
 Photos of instax mini prints (chekis) lying on a desk, shot with a Pixel. Two jobs:
 make the whites and blacks consistent across the whole collection, and — for photos
@@ -10,13 +10,14 @@ for what has already been processed and what the numbers came out at.
 ## Layout
 
 ```
-chekis/
-  chekibalance.py       batch CLI (desktop) — the reference implementation
-  cheki.html            single-file phone app, same pipeline ported to JS
-  CLAUDE.md             this file
-  docs/PIPELINE.md      the algorithm, why each step is the way it is
-  docs/HISTORY.md       every batch processed, with before/after measurements
-  <batch folders>/      source photos, each with a balanced/ subfolder of output
+checleaner/
+  checleaner.py          batch CLI (desktop) — the reference implementation
+  checleaner.html        single-file phone app, same pipeline ported to JS
+  CLAUDE.md              this file
+  README.md              project overview
+  docs/PIPELINE.md       the algorithm, why each step is the way it is
+  docs/HISTORY.md        every batch processed, with before/after measurements
+  <batch folders>/       source photos, each with a balanced/ subfolder of output
 ```
 
 Source photos are never modified in place. Output goes to `balanced/` (and
@@ -26,15 +27,15 @@ Source photos are never modified in place. Output goes to `balanced/` (and
 
 ```bash
 pip install numpy opencv-python pillow scipy piexif
-python3 chekibalance.py FOLDER/            # -> FOLDER/balanced, FOLDER/review, FOLDER/report.csv
-python3 chekibalance.py FOLDER/ --dry-run  # measure and report, write nothing
+python3 checleaner.py FOLDER/            # -> FOLDER/balanced, FOLDER/review, FOLDER/report.csv
+python3 checleaner.py FOLDER/ --dry-run  # measure and report, write nothing
 ```
 
 ~10 s per photo. `report.csv` records every measurement and flag, including for
 files that passed — check it rather than assuming a clean run means clean output.
 
 The phone app is opened directly in a browser; there is no build step. To test it
-headlessly, drive it with Playwright: load `file://.../cheki.html`, `setInputFiles`
+headlessly, drive it with Playwright: load `file://.../checleaner.html`, `setInputFiles`
 on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
 `#stats`. There is no assertion harness yet — see Next steps.
 
@@ -63,7 +64,7 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
 
 ## Next steps, roughly in order of value
 
-1. **Port the paper-frame detector from `cheki.html` back to `chekibalance.py`.**
+1. **Port the paper-frame detector from `checleaner.html` back to `checleaner.py`.**
    The JS finds the card by its white border rather than by "not desk", and is
    measurably better: aspects land 1.579–1.611 against the Python's 1.54–1.62 on
    the same 11 photos. This is the single biggest known win.
@@ -75,5 +76,5 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    that touch and merge into one blob.
 4. **EXIF on the phone app.** Canvas drops it, so phone-cleaned files lose the
    capture date that the Python preserves. Needs manual JPEG segment splicing.
-5. **Host `cheki.html` over HTTPS** to make it installable to the home screen and
+5. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
    available in the Android share sheet. A `file://` page can be neither.

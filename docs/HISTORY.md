@@ -96,7 +96,7 @@ red — the closest to neutral of anything in the folder.
 
 ## Automation results
 
-`chekibalance.py` run over `rancheki/` unattended: **19 of 20 to `balanced/`,
+`checleaner.py` run over `rancheki/` unattended: **19 of 20 to `balanced/`,
 1 to `review/`**. All 11 singles cropped, deskewed and turned upright; all 8
 multi-print shots balanced and left whole. Colour output indistinguishable from
 the hand pass — white 239.9, 239.9, 240.7 against 239.8, 240.0, 240.4.
@@ -105,7 +105,7 @@ The one flagged file, `20260601_053951`, is the three-print shot: a clean rectan
 at aspect 1.884, genuinely ambiguous between "three prints in a row" and "one print
 fitted badly". Correct behaviour — it should ask.
 
-`cheki.html` on the same 11 singles: **11 of 11, no warnings.** Aspects 1.579–1.611,
+`checleaner.html` on the same 11 singles: **11 of 11, no warnings.** Aspects 1.579–1.611,
 border ratios 2.02–2.18. Gains match the Python to ~1% (`033253`: 1.596, 1.324,
 1.244 in the browser against 1.579, 1.309, 1.242 on desktop). ~2 s per photo on a
 desktop CPU, expect 5–10 s on a Pixel 7.

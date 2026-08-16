@@ -74,12 +74,12 @@ are genuinely different wood will never match — see the pine vs walnut case in
 
 Two implementations, and **the newer one is better**.
 
-**`chekibalance.py` — "everything that isn't desk".** Model the desk in CIELAB from
+**`checleaner.py` — "everything that isn't desk".** Model the desk in CIELAB from
 a ring around the frame border (safe: the print is never at the very edge), mask
 pixels more than 5 normalised units away, close 15×15, open 9×9, take the largest
 connected component, `minAreaRect`. Works on ~90% of fronts.
 
-**`cheki.html` — "find the white paper frame".** Bright *and* near-neutral:
+**`checleaner.html` — "find the white paper frame".** Bright *and* near-neutral:
 `L > 0.62 × p99(L)` and chroma < 16. Close with r=21 to bridge the photo window,
 open with r=8 to shed highlights.
 

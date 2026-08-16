@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-chekibalance - batch colour-balance and crop photos of instax mini prints.
+checleaner - batch colour-balance and crop photos of instax mini prints.
 
 Point it at a folder of phone photos of cheki (instax mini) fronts lying on a
 desk. For every photo it:
@@ -16,10 +16,10 @@ desk. For every photo it:
 Photos showing several prints are balanced but left uncropped.
 
 Usage:
-    python3 chekibalance.py PHOTOS/                 # -> PHOTOS/balanced, PHOTOS/review
-    python3 chekibalance.py PHOTOS/ -o OUT/         # choose the output root
-    python3 chekibalance.py PHOTOS/ --no-crop       # colour only, never crop
-    python3 chekibalance.py PHOTOS/ --dry-run       # measure and report, write nothing
+    python3 checleaner.py PHOTOS/                 # -> PHOTOS/balanced, PHOTOS/review
+    python3 checleaner.py PHOTOS/ -o OUT/         # choose the output root
+    python3 checleaner.py PHOTOS/ --no-crop       # colour only, never crop
+    python3 checleaner.py PHOTOS/ --dry-run       # measure and report, write nothing
 
 The defaults (white 238.8, black 2.2) are calibrated so separate runs on
 separate folders come out matching each other.
