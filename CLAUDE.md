@@ -19,6 +19,8 @@ checleaner/
   docs/HISTORY.md        every batch processed, with before/after measurements
   tools/detect.py        fast detection-only preview for named files (no colour pass)
   tests/test_pipeline.py regression tests: colour targets, aspect, orientation, single-vs-multi
+  web/                   PWA assets (manifest, service worker, icons) for the hosted app
+  .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
     <other>/               ad hoc structure for a specific shoot, e.g. rancheki,
@@ -123,5 +125,11 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
    into one blob.
-4. **Host `checleaner.html` over HTTPS** to make it installable to the home screen and
-   available in the Android share sheet. A `file://` page can be neither.
+4. *(done)* **Hosted over HTTPS on GitHub Pages** — `.github/workflows/pages.yml`
+   publishes `checleaner.html` as the site root plus the `web/` PWA assets
+   (manifest, service worker, icons), so it installs to the home screen and
+   registers a Web Share Target for the Android share sheet. The service worker
+   caches the shell for offline use and catches the shared-image POST; the
+   `file://` path is unchanged (the PWA bits self-disable off http/https). The
+   file at the repo root stays the single source of truth — the workflow copies,
+   it doesn't fork.

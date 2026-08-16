@@ -1,0 +1,39 @@
+# Publishes checleaner.html (the phone app) to GitHub Pages over HTTPS.
+# The single source of truth stays checleaner.html at the repo root; this only
+# assembles it plus the PWA assets in web/ into the published site, so there is
+# no second copy to keep in sync.
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+    paths: [checleaner.html, web/**, .github/workflows/pages.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp checleaner.html _site/index.html
+          cp web/manifest.webmanifest web/sw.js web/icon-192.png web/icon-512.png web/apple-touch-icon.png _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

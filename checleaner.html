@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#14110f">
+<!-- PWA: present only when hosted (see .github/workflows/pages.yml); harmless on file:// -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Checleaner">
 <title>Checleaner</title>
 <style>
   :root{
@@ -939,8 +944,7 @@ function report(res) {
   $("stage").classList.add("on");
 }
 
-$("pick").addEventListener("change", async e => {
-  const file = e.target.files && e.target.files[0];
+async function runFile(file) {
   if (!file) return;
   $("stage").classList.remove("on");
   try {
@@ -956,8 +960,33 @@ $("pick").addEventListener("change", async e => {
     setStatus("something went wrong: " + err.message);
     console.error(err);
   }
+}
+
+$("pick").addEventListener("change", async e => {
+  await runFile(e.target.files && e.target.files[0]);
   e.target.value = "";
 });
+
+/* Hosted only: register the service worker (offline + share target) and pick up
+   an image handed to us by the Android share sheet. Both are no-ops on file://,
+   where the app is opened directly and neither is available. */
+if (location.protocol === "https:" || location.protocol === "http:") {
+  if ("serviceWorker" in navigator)
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  if (new URLSearchParams(location.search).has("shared")) {
+    setStatus("opening shared photo…");
+    caches.open("shared")
+      .then(c => c.match("shared-image").then(r => { c.delete("shared-image"); return r; }))
+      .then(async r => {
+        if (!r) { setStatus("pick a cheki photo to begin"); return; }
+        const name = decodeURIComponent(r.headers.get("x-filename") || "shared.jpg");
+        const blob = await r.blob();
+        history.replaceState(null, "", location.pathname);   // drop ?shared from the URL
+        await runFile(new File([blob], name, { type: blob.type || "image/jpeg" }));
+      })
+      .catch(() => {});
+  }
+}
 
 function applyRotation(fn) {
   if (!resultCanvas) return;
