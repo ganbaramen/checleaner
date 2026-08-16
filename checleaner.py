@@ -809,6 +809,21 @@ def run(args) -> int:
                       and args.aspect_lo <= det.aspect <= args.aspect_hi
                       and det.fill >= args.min_fill
                       and det.solidity >= args.min_solidity)
+            near_miss = (det.quad is not None and det.n_blobs == 1
+                         and 1.40 <= det.aspect <= 1.90)
+            # Photo-window backstop for a single card-shaped blob: several prints
+            # in a tidy row merge into one clean rectangle that can pass the tight
+            # single test outright (aspect in range, no seams for fill/solidity to
+            # catch -- this is exactly how a real 3-print row got cropped as one
+            # card) or land just outside it as a near-miss. Either way, a blob
+            # enclosing many photo windows can't be one card, so overrule it. Only
+            # the high side is evidence: a low count proves nothing (count_windows).
+            if single or near_miss:
+                wins = count_windows(path)
+                if wins is not None:
+                    r.stats["windows"] = wins
+                    if wins >= args.multi_windows:
+                        single = near_miss = False
             if single:
                 r.stats.update(aspect=round(det.aspect, 3), fill=round(det.fill, 3))
                 quad, insets = trim_desk(img, det.quad)
@@ -826,23 +841,12 @@ def run(args) -> int:
                 img = crop
             else:
                 # Several prints, or one blob whose shape is nowhere near a single
-                # card (two prints side by side merge into one wide blob): that's an
-                # ordinary multi-print shot, so balance it and leave it whole.
-                # Only a near-miss — roughly card-shaped but failing the tight test —
-                # is worth a human look, because that's what a bad fit looks like.
+                # card (two prints side by side merge into one wide blob): an
+                # ordinary multi-print shot. Only a near-miss — roughly card-shaped
+                # but failing the tight test, and not overruled by the window
+                # backstop above — is worth a human look, because that is what a
+                # genuinely bad single-card fit looks like.
                 r.kind = "multi"
-                near_miss = (det.quad is not None and det.n_blobs == 1
-                             and 1.40 <= det.aspect <= 1.90)
-                if near_miss:
-                    # a card-shaped blob enclosing many photo windows can't be
-                    # one card -- overrule the near-miss and treat it as the
-                    # merged multi-print shot it is. Only the high side counts:
-                    # a low count proves nothing (see count_windows).
-                    wins = count_windows(path)
-                    if wins is not None:
-                        r.stats["windows"] = wins
-                        if wins >= args.multi_windows:
-                            near_miss = False
                 # align_multi only levels; the content turn (a quarter or half
                 # turn so the frame isn't left sideways) is decided *first* and
                 # folded into the alignment warp, because the crop shape is

@@ -110,19 +110,26 @@ multi-print photo — balance it and leave it whole, no flag. Only a near-miss
 (aspect 1.40–1.90, i.e. roughly card-shaped but failing the tight test) is worth a
 human look, because that is what a genuinely bad fit looks like.
 
-One class of near-miss can be cleared automatically: **overlapping prints**.
-Prints laid over each other merge into a single blob whose shape statistics can
+**Overlapping prints** are the hard case, and a photo-window count is the
+backstop. Prints laid over each other merge into one blob whose shape stats can
 beat a real card's — white border on white border leaves no seam, so fill and
 solidity see nothing (one 4-print row measured fill 0.988, solidity 0.991,
 cleaner than some genuine singles) — but each print's *picture* stays dark and
 separate, an enclosed hole in the paper mask. `count_windows()` counts those
 holes: one card encloses one window, fragmented at most into a few pieces where
 bright content bridges it to the border (worst genuine single in the library:
-6 fragments), while merged multi-print blobs run 7–18. A near-miss with
-`--multi-windows` (default 7) or more windows is therefore treated as the
-multi-print shot it is and sent down the align path instead of to review. Only
-the high side counts as evidence — a low count proves nothing, so those stay
-flagged. The count lands in `report.csv`'s `windows` column.
+6 fragments), while merged multi-print blobs run 7–18. A blob with
+`--multi-windows` (default 7) or more windows can't be one card, so it is
+treated as the multi-print shot it is and sent down the align path.
+
+This check guards **both** decisions, not just near-misses: a tidy row can slip
+right through the tight single test (one real 3-print row landed aspect 1.639,
+fill 0.994, solidity 0.992 — all inside the gate) and would be warped into a
+single card, betrayed only by a wild border ratio, if the window count didn't
+overrule it too. Only the high side is evidence — a low count proves nothing
+(overlap can hide windows), so a near-miss that *fails* the count stays flagged
+for review rather than being forced through. The count lands in `report.csv`'s
+`windows` column.
 
 ## 4. Crop
 

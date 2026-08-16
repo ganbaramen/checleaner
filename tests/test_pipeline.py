@@ -319,6 +319,23 @@ def test_real_window_counts_split_near_misses_from_singles():
         skip("none of the window-count reference photos are present")
 
 
+def test_row_passing_single_shape_is_caught_by_windows():
+    """A tidy row of prints can pass the single-card SHAPE test outright -- one
+    real 3-print row landed aspect 1.639, fill 0.994, solidity 0.992, all inside
+    the single gate -- and would be warped into one card if shape were the only
+    check. The window backstop must still catch it, which is why the count is
+    run for single-gate passers too, not only near-misses."""
+    path = os.path.join(REPO, "chekis", "main", "PXL_20260811_012024586.MP.jpg")
+    if not os.path.exists(path):
+        skip("row-shaped reference photo not present")
+    d = detect_print(path)
+    passes_shape = (d.n_blobs == 1
+                    and DEFAULTS.aspect_lo <= d.aspect <= DEFAULTS.aspect_hi
+                    and d.fill >= DEFAULTS.min_fill and d.solidity >= DEFAULTS.min_solidity)
+    assert passes_shape, "fixture no longer passes the single shape gate; pick another"
+    assert count_windows(path) >= DEFAULTS.multi_windows, "backstop would miss this row"
+
+
 # Multi-print photos that align_multi levels but leaves mis-turned, with the
 # quarter/half turn (in 90-degree CCW units) that stands them upright...
 REAL_REORIENT = {

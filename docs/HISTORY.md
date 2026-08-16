@@ -475,6 +475,20 @@ balanced; the other three reclassified but kept a *different* flag (blown white
 reference, mostly) so stayed in review on their own merit. Net: balanced
 40 -> 47, review 26 -> 19.
 
+## Window backstop extended to catch single-gate passers (2026-08-16)
+
+Reshooting the clipped-border files (see above) surfaced a bad crop: a reshot
+3-print row (012024586) landed aspect 1.639, fill 0.994, solidity 0.992 -- all
+inside the single-card gate -- so it was warped into one card and rotated
+sideways, the only tell a border ratio of 12. The window count that already
+caught overlapping *near-misses* was only being run on blobs that *failed* the
+single test; a row tidy enough to pass sailed past it. Fixed by running
+`count_windows()` for single-gate passers too and demoting any with >=
+`--multi-windows` windows. 012024586 (7 windows) now balances as a whole
+multi-print frame instead of a mangled single. Full --force rerun: every kept
+single measures 1-6 windows (no genuine card wrongly demoted), 55/11 split
+unchanged.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
