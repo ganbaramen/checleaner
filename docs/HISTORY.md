@@ -489,6 +489,23 @@ multi-print frame instead of a mangled single. Full --force rerun: every kept
 single measures 1-6 windows (no genuine card wrongly demoted), 55/11 split
 unchanged.
 
+## Aligned crops recentred on real paper for even margins (2026-08-16)
+
+A grid photo (041037832) came out with its top prints jammed against the edge
+and a desk strip along the bottom. Cause: the segmentation close bridged the
+bottom prints to a patch of bright desk near the frame edge, so the blob's
+bounding box overshot ~70 px past the real prints, sliding the (centred) crop
+down. A margin sweep of all aligned files found this on 4 of them: one edge
+tight, the opposite 33-69 px loose.
+
+Fixed with `_paper_center()`: recentre the crop on the actual paper extent
+(bright + near-neutral, opened but *not* closed -- the close is what reaches
+into the glare), trusted only when that span tracks the blob's size and the
+implied shift is small. After a --force rerun the worst top/bottom gap fell from
+69 px to 6, mean ~2 px, no file over 15; already-even crops were untouched
+(023359428 stayed 0/0). New opt-in test asserts balanced margins on the three
+worst former offenders.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

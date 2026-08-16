@@ -370,6 +370,39 @@ CROP_ASPECTS = [
 ]
 
 
+def _paper_center(bgr: np.ndarray, blob_bbox, scale=0.25):
+    """Centre of the bright, near-neutral paper inside `blob_bbox`, or None.
+
+    Used only to recentre a multi-print crop, so it must be *tighter* than the
+    detection blob, never looser: it opens (to shed stray bright specks) but does
+    not close (the close is what bridged the blob into desk glare in the first
+    place). The result is trusted only when it lands inside the blob's own bbox
+    and covers a real amount of it -- otherwise the blob centre stands.
+    """
+    x0, y0, x1, y1 = blob_bbox
+    small = cv2.resize(bgr, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    L, A, B = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
+    pm = ((L > 0.62 * np.percentile(L, 99)) & (np.hypot(A - 128, B - 128) < 16)).astype(np.uint8)
+    pm = cv2.morphologyEx(pm, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    ys, xs = np.where(pm)
+    if len(ys) < 200:
+        return None
+    px0, py0, px1, py1 = xs.min() / scale, ys.min() / scale, xs.max() / scale, ys.max() / scale
+    pw, ph, bw, bh = px1 - px0, py1 - py0, x1 - x0, y1 - y0
+    # The paper span should track the blob's: much smaller means the test missed
+    # prints, much larger means it grabbed something past them (a bright wall,
+    # blown desk). Either way, don't trust it. A few px of overshoot is normal --
+    # paper detection catches the true border edge the blob's rect can undercut.
+    if not (0.5 * bw <= pw <= 1.3 * bw and 0.5 * bh <= ph <= 1.3 * bh):
+        return None
+    pcx, pcy = (px0 + px1) / 2, (py0 + py1) / 2
+    # only a gentle recentre; a big shift means the paper read is unreliable
+    if abs(pcx - (x0 + x1) / 2) > 0.15 * bw or abs(pcy - (y0 + y1) / 2) > 0.15 * bh:
+        return None
+    return pcx, pcy
+
+
 def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
     """Rotate and crop a multi-print photo so the prints sit level and centred.
 
@@ -414,6 +447,17 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
     x1, y1 = pts.max(axis=0)
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     bw2, bh2 = (x1 - x0) / 2, (y1 - y0) / 2
+
+    # Recentre on the *actual* paper. The detected blob can overshoot the prints
+    # at one edge -- the segmentation close that bridges each print's photo
+    # window also bridges a print to bright desk glare or a shadow just past it
+    # -- which slides the crop off centre, so one margin vanishes while the
+    # opposite grows (a real complaint on ~1 photo in 5). Paper here is
+    # bright-and-neutral *opened but not closed*: the close is exactly what
+    # reaches into the glare, so leaving it out gives the true paper edge.
+    pcenter = _paper_center(rotated, (x0, y0, x1, y1))
+    if pcenter is not None:
+        cx, cy = pcenter
 
     # does a crop stay inside the photo's real (unrotated) footprint, or would
     # it reach past an edge into the blank fill the rotation opened up?

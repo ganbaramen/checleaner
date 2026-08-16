@@ -366,6 +366,41 @@ def test_content_rotation_no_ops_without_a_detector():
         checleaner._FACE_DET = saved
 
 
+def test_real_aligned_crops_have_balanced_margins():
+    """align_multi recentres on the true paper extent, so opposite desk margins
+    come out roughly equal even when the detection blob overshoots the prints at
+    one edge. These files each had a tight edge opposite a 33-69px one before the
+    recentre; assert the top/bottom desk margins now match within 20px."""
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    if checleaner._face_detector() is None:
+        skip("face model unavailable (turn affects the crop orientation)")
+    import numpy as np
+    checked = 0
+    for name in ["PXL_20260803_041037832.MP.jpg", "PXL_20260804_005646298.MP.jpg",
+                 "PXL_20260803_034550829.MP.jpg"]:
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        img = cv2.imread(path)
+        out = align_multi(img, detect_all_prints(path), turn=content_rotation(img))
+        assert out is not None, f"{name} should align"
+        crop = out[0]
+        lab = cv2.cvtColor(cv2.GaussianBlur(crop, (7, 7), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+        hi = np.percentile(lab[:, :, 0], 99)
+        paper = ((lab[:, :, 0] > 0.62 * hi)
+                 & (np.hypot(lab[:, :, 1] - 128, lab[:, :, 2] - 128) < 16)).astype(np.uint8)
+        paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+        H = paper.shape[0]
+        rows = np.where(paper.max(axis=1) > 0)[0]
+        top, bottom = int(rows.min()), int(H - 1 - rows.max())
+        checked += 1
+        assert abs(top - bottom) <= 20, f"{name}: top {top} vs bottom {bottom} margin"
+    if checked == 0:
+        skip("none of the margin reference photos are present")
+
+
 def test_real_multiprint_reorientation():
     folder = os.path.join(REPO, "chekis", "main")
     if not os.path.isdir(folder):

@@ -241,6 +241,19 @@ crop around it centred at the bounding box's own centre — centring there
 makes the equal-margin requirement (top gap = bottom gap, left gap = right
 gap) automatic for *any* crop size, not something to solve for separately.
 
+One wrinkle: the detection blob can overshoot the prints at one edge. The
+segmentation *close* that bridges each print's photo window (§ 3) will also
+bridge a print to a patch of bright desk glare or a shadow just past it, and
+that phantom extent slides the bounding box — and so the crop — off the prints,
+leaving one margin at zero while the opposite one grows (a real, visible
+complaint on roughly one aligned photo in five). So the crop is recentred on
+the *actual* paper: bright-and-near-neutral pixels, **opened but not closed**,
+since the close is exactly what reached into the glare. The recentre is trusted
+only when that paper span tracks the blob's (not much smaller — missed prints;
+not much larger — grabbed a wall or blown desk) and only shifts the centre
+gently; otherwise the blob centre stands. This dropped the worst top-vs-bottom
+margin gap across `chekis/main/` from 69 px to 6.
+
 The crop's shape comes from `CROP_ASPECTS` (4:3, 3:4, 1:1, 16:9 — a plain
 list, extend it there). For each candidate, the tightest crop at that ratio
 containing every print pins one axis (zero margin) and leaves the excess on
