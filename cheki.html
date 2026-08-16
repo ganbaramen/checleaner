@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<title>Cheki Clean</title>
+<style>
+  :root{
+    --bg:#14110f; --card:#1e1a17; --line:#332c27; --ink:#f2ece6;
+    --dim:#a1948a; --accent:#e8b17a; --warn:#e0a33c; --ok:#7fc99a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-text-size-adjust:100%}
+  body{padding:20px 16px calc(28px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 2px;letter-spacing:-.01em}
+  .sub{color:var(--dim);font-size:13px;margin:0 0 20px}
+  button{font:inherit;font-weight:600;border:0;border-radius:14px;padding:16px 20px;width:100%;
+    background:var(--accent);color:#241a10;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  button:disabled{opacity:.4}
+  button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line);font-weight:500}
+  .row{display:flex;gap:10px;margin-top:10px}
+  .row button{margin:0}
+  label.file{display:block}
+  label.file input{display:none}
+  label.file span{display:block;text-align:center;font-weight:600;border-radius:14px;padding:16px 20px;
+    background:var(--accent);color:#241a10}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:16px}
+  .stage{margin-top:18px;display:none}
+  .stage.on{display:block}
+  canvas{width:100%;height:auto;display:block;border-radius:10px;background:#000}
+  .pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .pair figcaption{font-size:11px;color:var(--dim);text-align:center;margin-top:6px;
+    text-transform:uppercase;letter-spacing:.08em}
+  figure{margin:0}
+  .status{color:var(--dim);font-size:14px;min-height:22px;margin-top:14px}
+  .flag{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin-top:8px;color:var(--warn)}
+  .flag.ok{color:var(--ok)}
+  .flag b{flex:0 0 auto}
+  table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+  td{padding:4px 0;border-bottom:1px solid var(--line);color:var(--dim)}
+  td:last-child{text-align:right;color:var(--ink)}
+  tr:last-child td{border-bottom:0}
+  details{margin-top:14px}
+  summary{color:var(--dim);font-size:13px;cursor:pointer;list-style:none}
+  summary::-webkit-details-marker{display:none}
+  summary::before{content:"▸ ";}
+  details[open] summary::before{content:"▾ ";}
+  .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.45}
+</style>
+</head>
+<body>
+
+<h1>Cheki Clean</h1>
+<p class="sub">Balances a photo of an instax mini print, then straightens and crops it.</p>
+
+<label class="file">
+  <input type="file" id="pick" accept="image/*">
+  <span>Take or choose a photo</span>
+</label>
+
+<div class="status" id="status"></div>
+
+<div class="stage" id="stage">
+  <div class="card">
+    <div class="pair">
+      <figure><canvas id="before"></canvas><figcaption>before</figcaption></figure>
+      <figure><canvas id="after"></canvas><figcaption>after</figcaption></figure>
+    </div>
+    <div id="flags"></div>
+  </div>
+
+  <div class="row">
+    <button id="save">Save image</button>
+    <button id="rotate" class="ghost">Rotate 180°</button>
+  </div>
+
+  <details>
+    <summary>Measurements</summary>
+    <div class="card"><table id="stats"></table></div>
+  </details>
+</div>
+
+<p class="hint">
+  Whites and blacks are pulled to fixed targets (238.8 / 2.2), the same ones used on the
+  desktop batches — so anything cleaned here matches that library. Single prints get cropped
+  to true instax proportions; if the photo holds more than one print it is balanced and left whole.
+  Everything runs on the phone; no photo leaves it.
+</p>
+
+<script>
+"use strict";
+
+/* ============================================================================
+   Cheki Clean — port of the chekibalance pipeline to the browser.
+
+   Same maths as the Python: measure the print's white border and the frame's
+   black point, solve a per-channel gain+offset in LINEAR light so both land on
+   fixed targets, then find the card, rectify it to 54x86 proportions and turn it
+   the right way up. No desk matching here — that needs a folder to average over.
+   ========================================================================== */
+
+const WHITE_TARGET = 238.8;   // sRGB value the paper border should land on
+const BLACK_TARGET = 2.2;     // sRGB value the darkest content should land on
+const ASPECT   = 86 / 54;     // instax mini card
+const OUT_W    = 1800;
+const OUT_H    = Math.round(OUT_W * ASPECT);
+const ANALYSIS = 1100;        // long edge used for measuring and detection
+
+/* ------------------------------------------------------------ colour space */
+
+const LIN = new Float32Array(256);          // sRGB byte -> linear
+for (let i = 0; i < 256; i++) {
+  const x = i / 255;
+  LIN[i] = x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+}
+const toSRGB = v => {
+  v = v < 0 ? 0 : v > 1 ? 1 : v;
+  return (v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055) * 255;
+};
+// roll highlights off instead of clipping them flat, so paper keeps its texture
+const shoulder = (x, knee = 0.90) =>
+  x <= knee ? x : knee + (1 - knee) * Math.tanh((x - knee) / (1 - knee));
+
+/* --------------------------------------------------------------- utilities */
+
+function percentile(arr, p, stride = 1) {
+  const s = [];
+  for (let i = 0; i < arr.length; i += stride) s.push(arr[i]);
+  s.sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.max(0, Math.floor(p / 100 * (s.length - 1))))];
+}
+function medianOf(vals) {
+  vals.sort((a, b) => a - b);
+  const n = vals.length;
+  if (!n) return 0;
+  return n % 2 ? vals[(n - 1) >> 1] : 0.5 * (vals[n / 2 - 1] + vals[n / 2]);
+}
+// integral image, for box mean/variance and binary morphology in O(1) per pixel
+function integral(src, w, h) {
+  const I = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let run = 0;
+    for (let x = 0; x < w; x++) {
+      run += src[y * w + x];
+      I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + run;
+    }
+  }
+  return I;
+}
+function boxSum(I, w, x0, y0, x1, y1) {
+  const W = w + 1;
+  return I[y1 * W + x1] - I[y0 * W + x1] - I[y1 * W + x0] + I[y0 * W + x0];
+}
+function boxStats(src, w, h, r) {
+  const I = integral(src, w, h);
+  const sq = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) sq[i] = src[i] * src[i];
+  const I2 = integral(sq, w, h);
+  const mean = new Float32Array(w * h), sd = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+      const n = (x1 - x0) * (y1 - y0);
+      const m = boxSum(I, w, x0, y0, x1, y1) / n;
+      const v = boxSum(I2, w, x0, y0, x1, y1) / n - m * m;
+      mean[y * w + x] = m;
+      sd[y * w + x] = v > 0 ? Math.sqrt(v) : 0;
+    }
+  }
+  return { mean, sd };
+}
+// binary morphology via integral image: dilate = any set in window, erode = all set
+function morph(mask, w, h, r, mode) {
+  const I = integral(mask, w, h);
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+      const s = boxSum(I, w, x0, y0, x1, y1);
+      out[y * w + x] = mode === "d" ? (s > 0 ? 1 : 0)
+                                    : (s === (x1 - x0) * (y1 - y0) ? 1 : 0);
+    }
+  }
+  return out;
+}
+const close = (m, w, h, r) => morph(morph(m, w, h, r, "d"), w, h, r, "e");
+// box blur on RGBA, standing in for the Gaussian the Python does before Lab.
+// Without it the desk's wood grain survives into the mask and the morphology
+// merges print and grain into one sprawling blob.
+function blurRGBA(data, w, h, r) {
+  const out = new Uint8ClampedArray(data.length);
+  for (let c = 0; c < 3; c++) {
+    const plane = new Float64Array(w * h);
+    for (let i = 0; i < w * h; i++) plane[i] = data[i * 4 + c];
+    const I = integral(plane, w, h);
+    for (let y = 0; y < h; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+      for (let x = 0; x < w; x++) {
+        const x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+        out[(y * w + x) * 4 + c] = boxSum(I, w, x0, y0, x1, y1) / ((x1 - x0) * (y1 - y0));
+      }
+    }
+  }
+  for (let i = 3; i < out.length; i += 4) out[i] = 255;
+  return out;
+}
+const open  = (m, w, h, r) => morph(morph(m, w, h, r, "e"), w, h, r, "d");
+
+/* ------------------------------------------------------------------ CIELAB */
+/* OpenCV's 8-bit convention (L 0-255, a/b offset by 128) so every threshold
+   ported from the Python keeps its meaning. */
+function toLab(data, w, h) {
+  const L = new Float32Array(w * h), A = new Float32Array(w * h), B = new Float32Array(w * h);
+  const f = t => t > 0.008856 ? Math.cbrt(t) : (7.787 * t + 16 / 116);
+  for (let i = 0, p = 0; i < w * h; i++, p += 4) {
+    const r = LIN[data[p]], g = LIN[data[p + 1]], b = LIN[data[p + 2]];
+    const X = (0.4124 * r + 0.3576 * g + 0.1805 * b) / 0.9505;
+    const Y =  0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const Z = (0.0193 * r + 0.1192 * g + 0.9505 * b) / 1.0890;
+    const fx = f(X), fy = f(Y), fz = f(Z);
+    L[i] = (116 * fy - 16) * 255 / 100;
+    A[i] = 500 * (fx - fy) + 128;
+    B[i] = 200 * (fy - fz) + 128;
+  }
+  return { L, A, B };
+}
+
+/* --------------------------------------------------------------- measuring */
+
+function measure(data, w, h) {
+  const n = w * h;
+  const lum = new Float32Array(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4)
+    lum[i] = (data[p] + data[p + 1] + data[p + 2]) / 3;
+
+  const { sd } = boxStats(lum, w, h, 4);              // 9x9 window, as in the Python
+  const stride = Math.max(1, Math.floor(n / 60000));
+  const lumHi = percentile(lum, 80, stride);
+  const sdLo  = percentile(sd, 25, stride);
+  const lumLo = percentile(lum, 0.5, stride);
+
+  let wr = [], wg = [], wb = [];                      // white: bright, smooth, unclipped
+  let br = 0, bg = 0, bb = 0, bn = 0;                 // black: darkest 0.5%
+  let bright = 0, clipped = 0;
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const R = data[p], G = data[p + 1], Bv = data[p + 2];
+    const mx = R > G ? (R > Bv ? R : Bv) : (G > Bv ? G : Bv);
+    if (lum[i] > lumHi) { bright++; if (mx >= 250) clipped++; }
+    if (lum[i] > lumHi && sd[i] < sdLo && mx < 250) { wr.push(R); wg.push(G); wb.push(Bv); }
+    if (lum[i] < lumLo) { br += LIN[R]; bg += LIN[G]; bb += LIN[Bv]; bn++; }
+  }
+  if (wr.length < 400) {                              // tiny border: drop the smoothness test
+    wr = []; wg = []; wb = [];
+    for (let i = 0, p = 0; i < n; i++, p += 4) {
+      const R = data[p], G = data[p + 1], Bv = data[p + 2];
+      const mx = Math.max(R, G, Bv);
+      if (lum[i] > lumHi && mx < 250) { wr.push(R); wg.push(G); wb.push(Bv); }
+    }
+  }
+  if (!wr.length || !bn) return null;
+  return {
+    white: [LIN[Math.round(medianOf(wr))], LIN[Math.round(medianOf(wg))], LIN[Math.round(medianOf(wb))]],
+    black: [br / bn, bg / bn, bb / bn],
+    clipped: bright ? clipped / bright : 0,
+  };
+}
+
+/* Per-channel gain+offset in linear light, iterated because applying the
+   transform moves the very pixels the anchors were measured from. */
+function solveLevels(data, w, h, m0) {
+  const wt = LIN[Math.round(WHITE_TARGET)], bt = LIN[Math.round(BLACK_TARGET)];
+  let W = [wt, wt, wt], B = [bt, bt, bt], gain = [1, 1, 1], off = [0, 0, 0];
+  const scratch = new Uint8ClampedArray(data.length);
+  for (let it = 0; it < 5; it++) {
+    for (let c = 0; c < 3; c++) {
+      gain[c] = (W[c] - B[c]) / (m0.white[c] - m0.black[c]);
+      off[c]  = B[c] - gain[c] * m0.black[c];
+    }
+    const lut = buildLUT(gain, off);
+    for (let p = 0; p < data.length; p += 4) {
+      scratch[p]     = lut[0][data[p]];
+      scratch[p + 1] = lut[1][data[p + 1]];
+      scratch[p + 2] = lut[2][data[p + 2]];
+      scratch[p + 3] = 255;
+    }
+    const got = measure(scratch, w, h);
+    if (!got) break;
+    let done = true;
+    for (let c = 0; c < 3; c++) {
+      const ew = wt / got.white[c], eb = bt - got.black[c];
+      if (Math.abs(ew - 1) > 0.004 || Math.abs(eb) > 0.0004) done = false;
+      W[c] *= ew; B[c] += eb;
+    }
+    if (done) break;
+  }
+  return { gain, off };
+}
+
+/* The whole colour transform is a scalar function per channel, so it collapses
+   into three 256-entry lookup tables — which is what makes full resolution cheap. */
+function buildLUT(gain, off) {
+  const lut = [new Uint8ClampedArray(256), new Uint8ClampedArray(256), new Uint8ClampedArray(256)];
+  for (let c = 0; c < 3; c++)
+    for (let v = 0; v < 256; v++)
+      lut[c][v] = Math.round(toSRGB(shoulder(Math.max(0, LIN[v] * gain[c] + off[c]))));
+  return lut;
+}
+
+/* ---------------------------------------------------------------- geometry */
+
+/* Find the card by its white paper frame.
+
+   The obvious approach — "everything that isn't desk" — is what the desktop
+   version uses, but it struggles here: a print's dark photo area is often as
+   dark and as warm as walnut, so the mask comes out as a hollow frame and any
+   bright patch of desk merges into it. The paper border is the more distinctive
+   feature: bright AND near-neutral, which desk never is. */
+function detectPrint(data, w, h) {
+  const n = w * h;
+  const { L, A, B } = toLab(blurRGBA(data, w, h, 3), w, h);
+
+  const sample = [];
+  for (let i = 0; i < n; i += 7) sample.push(L[i]);
+  sample.sort((a, b) => a - b);
+  const hi = sample[Math.floor(0.99 * (sample.length - 1))];
+
+  const mask = new Uint8Array(n);
+  for (let i = 0; i < n; i++)
+    mask[i] = (L[i] > 0.62 * hi && Math.hypot(A[i] - 128, B[i] - 128) < 16) ? 1 : 0;
+  // close wide enough to bridge the photo window, then open to shed highlights
+  const cleaned = open(close(mask, w, h, 21), w, h, 8);
+
+  const seen = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  const blobs = [];
+  for (let s = 0; s < n; s++) {
+    if (!cleaned[s] || seen[s]) continue;
+    let top = 0, count = 0;
+    stack[top++] = s; seen[s] = 1;
+    const pts = [];
+    while (top) {
+      const i = stack[--top]; count++;
+      const x = i % w, y = (i / w) | 0;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1 || !cleaned[i - 1] ||
+          !cleaned[i + 1] || !cleaned[i - w] || !cleaned[i + w]) pts.push(x, y);
+      if (x > 0     && cleaned[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack[top++] = i - 1; }
+      if (x < w - 1 && cleaned[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack[top++] = i + 1; }
+      if (y > 0     && cleaned[i - w] && !seen[i - w]) { seen[i - w] = 1; stack[top++] = i - w; }
+      if (y < h - 1 && cleaned[i + w] && !seen[i + w]) { seen[i + w] = 1; stack[top++] = i + w; }
+    }
+    if (count > 0.03 * n) blobs.push({ count, pts });
+  }
+  if (!blobs.length) return { quad: null, blobs: 0 };
+
+  blobs.sort((a, b) => b.count - a.count);
+  const hull = convexHull(blobs[0].pts);
+  const rect = minAreaRect(hull);
+  // fill measured on the hull, so a frame with an unfilled middle still scores 1
+  return { quad: rect.quad, aspect: rect.aspect,
+           fill: polyArea(hull) / rect.area, blobs: blobs.length };
+}
+
+function polyArea(poly) {
+  let a = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p = poly[i], q = poly[(i + 1) % poly.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return Math.abs(a) / 2;
+}
+function convexHull(flat) {
+  const pts = [];
+  for (let i = 0; i < flat.length; i += 2) pts.push([flat[i], flat[i + 1]]);
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const build = src => {
+    const out = [];
+    for (const p of src) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], p) <= 0) out.pop();
+      out.push(p);
+    }
+    out.pop();
+    return out;
+  };
+  return build(pts).concat(build(pts.slice().reverse()));
+}
+
+// rotating calipers: the min-area rectangle shares an edge with the hull
+function minAreaRect(hull) {
+  let best = null;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i], b = hull[(i + 1) % hull.length];
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    const c = Math.cos(-ang), s = Math.sin(-ang);
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    for (const p of hull) {
+      const X = p[0] * c - p[1] * s, Y = p[0] * s + p[1] * c;
+      if (X < x0) x0 = X; if (X > x1) x1 = X;
+      if (Y < y0) y0 = Y; if (Y > y1) y1 = Y;
+    }
+    const area = (x1 - x0) * (y1 - y0);
+    if (!best || area < best.area) best = { area, ang, x0, x1, y0, y1 };
+  }
+  const { ang, x0, x1, y0, y1 } = best;
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const un = (X, Y) => [X * c - Y * s, X * s + Y * c];
+  let quad = [un(x0, y0), un(x0, y1), un(x1, y1), un(x1, y0)];
+  const e = quad.map((p, i) => Math.hypot(quad[(i + 1) % 4][0] - p[0], quad[(i + 1) % 4][1] - p[1]));
+  if (e[0] + e[2] < e[1] + e[3]) quad = [quad[1], quad[2], quad[3], quad[0]];   // long edge first
+  const ee = quad.map((p, i) => Math.hypot(quad[(i + 1) % 4][0] - p[0], quad[(i + 1) % 4][1] - p[1]));
+  return { quad, area: best.area, aspect: (ee[0] + ee[2]) / (ee[1] + ee[3]) };
+}
+
+/* homography mapping quad -> [0,0],[0,H],[W,H],[W,0], solved as an 8x8 system */
+function homography(src, dst) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = src[i], [u, v] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -x * u, -y * u]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -x * v, -y * v]); b.push(v);
+  }
+  for (let col = 0; col < 8; col++) {                       // Gaussian elimination
+    let piv = col;
+    for (let r = col + 1; r < 8; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+    [A[col], A[piv]] = [A[piv], A[col]]; [b[col], b[piv]] = [b[piv], b[col]];
+    const d = A[col][col] || 1e-12;
+    for (let r = 0; r < 8; r++) {
+      if (r === col) continue;
+      const f = A[r][col] / d;
+      for (let k = col; k < 8; k++) A[r][k] -= f * A[col][k];
+      b[r] -= f * b[col];
+    }
+  }
+  const h = b.map((v, i) => v / (A[i][i] || 1e-12));
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+function invert3(m) {
+  const [a, b, c, d, e, f, g, h, i] = m;
+  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+  const inv = [
+    (e * i - f * h), (c * h - b * i), (b * f - c * e),
+    (f * g - d * i), (a * i - c * g), (c * d - a * f),
+    (d * h - e * g), (b * g - a * h), (a * e - b * d)];
+  return inv.map(v => v / det);
+}
+
+/* Wind a quad to match the destination rectangle's direction. Get this wrong and
+   the output comes out mirrored — which is subtle enough to miss on a portrait
+   but obvious the moment you read the signature. */
+function windQuad(quad) {
+  let a = 0;
+  for (let i = 0; i < 4; i++) {
+    const p = quad[i], q = quad[(i + 1) % 4];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return a > 0 ? quad.slice().reverse() : quad.slice();   // destination winds negative
+}
+
+/* Rectify `quad` out of a source canvas into an outW x outH canvas. */
+function warpQuad(srcCtx, sw, sh, quad, outW, outH, lut) {
+  const q = windQuad(quad);
+  const H = invert3(homography(q, [[0, 0], [0, outH - 1], [outW - 1, outH - 1], [outW - 1, 0]]));
+  const src = srcCtx.getImageData(0, 0, sw, sh).data;
+  const out = new ImageData(outW, outH);
+  const o = out.data;
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      const w_ = H[6] * x + H[7] * y + H[8];
+      const sx = (H[0] * x + H[1] * y + H[2]) / w_;
+      const sy = (H[3] * x + H[4] * y + H[5]) / w_;
+      const p = (y * outW + x) * 4;
+      if (sx < 0 || sy < 0 || sx >= sw - 1 || sy >= sh - 1) { o[p + 3] = 255; continue; }
+      const x0 = sx | 0, y0 = sy | 0, fx = sx - x0, fy = sy - y0;
+      const i00 = (y0 * sw + x0) * 4, i10 = i00 + 4, i01 = i00 + sw * 4, i11 = i01 + 4;
+      for (let c = 0; c < 3; c++) {
+        const v = src[i00 + c] * (1 - fx) * (1 - fy) + src[i10 + c] * fx * (1 - fy)
+                + src[i01 + c] * (1 - fx) * fy      + src[i11 + c] * fx * fy;
+        o[p + c] = lut ? lut[c][Math.round(v)] : v;
+      }
+      o[p + 3] = 255;
+    }
+  }
+  return out;
+}
+
+/* Pull each edge inward past any desk that crept into the crop. Works on a
+   provisional rectified crop, where "is this line desk?" is a 1-D question. */
+function trimInsets(img, w, h, deskHue, nv, deskL) {
+  const { L, A, B } = toLab(blurRGBA(img.data, w, h, 2), w, h);
+  const isDesk = i => {
+    const proj = (A[i] - 128) * deskHue[0] + (B[i] - 128) * deskHue[1];
+    return proj > 0.55 * nv && L[i] < 1.25 * deskL;
+  };
+  const scan = (axis, fromStart) => {
+    const span = axis === "y" ? h : w;
+    const cap = Math.round(0.035 * span);
+    let last = -1;
+    for (let k = 0; k < cap; k++) {
+      const idx = fromStart ? k : span - 1 - k;
+      const across = axis === "y" ? w : h;
+      let hits = 0, tot = 0;
+      for (let t = Math.round(0.12 * across); t < 0.88 * across; t++) {
+        const i = axis === "y" ? idx * w + t : t * w + idx;
+        tot++; if (isDesk(i)) hits++;
+      }
+      if (hits / tot > 0.08) last = k;
+    }
+    return last >= 0 ? last + 4 : 0;
+  };
+  return { top: scan("y", true), bottom: scan("y", false), left: scan("x", true), right: scan("x", false) };
+}
+
+/* How deep desk still reaches into a finished crop. Deliberately a plain
+   warm-and-dark test, not the hue model used for trimming: the point is to
+   second-guess that model, so it must not share its blind spots. */
+function residualDesk(img, w, h, skip = 4) {
+  const warm = i => {
+    const p = i * 4, R = img.data[p], G = img.data[p + 1], B = img.data[p + 2];
+    return R > B + 12 && (R + G + B) / 3 < 170;
+  };
+  const probe = (axis, fromStart) => {
+    const span = axis === "y" ? h : w, across = axis === "y" ? w : h;
+    let depth = 0;
+    for (let k = skip; k < Math.round(0.02 * span); k++) {
+      const idx = fromStart ? k : span - 1 - k;
+      let hits = 0, tot = 0;
+      for (let t = 0; t < across; t += 2) {
+        const i = axis === "y" ? idx * w + t : t * w + idx;
+        tot++; if (warm(i)) hits++;
+      }
+      if (hits / tot > 0.15) depth = k + 1;
+    }
+    return depth;
+  };
+  return { top: probe("y", true), bottom: probe("y", false),
+           left: probe("x", true), right: probe("x", false) };
+}
+
+/* Which way is up. An instax mini's photo window sits off-centre along the long
+   axis, so locating it says which end carries the wide signature border. Found
+   by its EDGES, not its brightness: brightness fails both on the signature (dark
+   ink inside the border) and on prints whose own content is pale. */
+function orientation(img, w, h) {
+  const prof = new Float64Array(h);
+  const x0 = Math.round(0.2 * w), x1 = Math.round(0.8 * w);
+  for (let y = 1; y < h - 1; y++) {
+    let s = 0;
+    for (let x = x0; x < x1; x += 2) {
+      const a = (( y - 1) * w + x) * 4, b = ((y + 1) * w + x) * 4;
+      const ga = (img.data[a] + img.data[a + 1] + img.data[a + 2]);
+      const gb = (img.data[b] + img.data[b + 1] + img.data[b + 2]);
+      s += Math.abs(gb - ga);
+    }
+    prof[y] = s;
+  }
+  const m = Math.round(0.03 * h);
+  for (let y = 0; y < m; y++) { prof[y] = 0; prof[h - 1 - y] = 0; }
+  let top = 0, bot = 0, tv = -1, bv = -1;
+  for (let y = 0; y < 0.45 * h; y++) if (prof[y] > tv) { tv = prof[y]; top = y; }
+  for (let y = Math.round(0.55 * h); y < h; y++) if (prof[y] > bv) { bv = prof[y]; bot = y; }
+  const topGap = top, botGap = h - 1 - bot;
+  const lo = Math.min(topGap, botGap), hi = Math.max(topGap, botGap);
+  return { flip: botGap < topGap, ratio: hi / Math.max(lo, 1) };
+}
+
+function rotate180(img) {
+  const { width: w, height: h, data: d } = img;
+  const out = new ImageData(w, h);
+  for (let i = 0, n = w * h; i < n; i++) {
+    const j = n - 1 - i;
+    out.data[j * 4]     = d[i * 4];
+    out.data[j * 4 + 1] = d[i * 4 + 1];
+    out.data[j * 4 + 2] = d[i * 4 + 2];
+    out.data[j * 4 + 3] = 255;
+  }
+  return out;
+}
+
+/* ============================================================ orchestration */
+
+const $ = id => document.getElementById(id);
+const statusEl = $("status");
+let resultCanvas = null, resultName = "cheki.jpg";
+
+const setStatus = t => { statusEl.textContent = t; };
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+
+function drawTo(canvas, img, maxW = 720) {
+  const scale = Math.min(1, maxW / img.width);
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const tmp = document.createElement("canvas");
+  tmp.width = img.width; tmp.height = img.height;
+  tmp.getContext("2d").putImageData(img, 0, 0);
+  canvas.getContext("2d").drawImage(tmp, 0, 0, canvas.width, canvas.height);
+}
+
+async function process(file) {
+  resultName = (file.name || "cheki").replace(/\.[^.]+$/, "") + "_clean.jpg";
+  setStatus("reading photo…");
+  await nextFrame();
+
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const full = document.createElement("canvas");
+  full.width = bitmap.width; full.height = bitmap.height;
+  const fctx = full.getContext("2d", { willReadFrequently: true });
+  fctx.drawImage(bitmap, 0, 0);
+  bitmap.close?.();
+
+  // downscaled copy for all measurement and detection
+  const s = ANALYSIS / Math.max(full.width, full.height);
+  const aw = Math.max(1, Math.round(full.width * s)), ah = Math.max(1, Math.round(full.height * s));
+  const small = document.createElement("canvas");
+  small.width = aw; small.height = ah;
+  const sctx = small.getContext("2d", { willReadFrequently: true });
+  sctx.drawImage(full, 0, 0, aw, ah);
+  const sdata = sctx.getImageData(0, 0, aw, ah);
+  drawTo($("before"), sdata);
+
+  setStatus("measuring white and black…");
+  await nextFrame();
+  const m0 = measure(sdata.data, aw, ah);
+  if (!m0) { setStatus("couldn't find a white border in this photo."); return null; }
+  const { gain, off } = solveLevels(sdata.data, aw, ah, m0);
+  const lut = buildLUT(gain, off);
+
+  setStatus("finding the print…");
+  await nextFrame();
+  const det = detectPrint(sdata.data, aw, ah);
+  const flags = [];
+  if (m0.clipped > 0.15) flags.push(`white reference ${(m0.clipped * 100).toFixed(0)}% clipped — correction is a guess`);
+  const gmax = Math.max(...gain), gmin = Math.min(...gain);
+  if (gmax > 2.2 || gmin < 1 / 2.2) flags.push(`strong correction (gain ${gain.map(v => v.toFixed(2)).join(", ")})`);
+
+  const isSingle = det.quad && det.blobs === 1 && det.aspect >= 1.53 && det.aspect <= 1.65 && det.fill >= 0.93;
+  let out, info = { aspect: det.aspect, fill: det.fill, blobs: det.blobs };
+
+  if (isSingle) {
+    setStatus("straightening and cropping…");
+    await nextFrame();
+    // desk hue from the analysis frame's border ring, for the trim test
+    const { L, A, B } = toLab(blurRGBA(sdata.data, aw, ah, 3), aw, ah);
+    const mm = Math.round(0.03 * Math.max(aw, ah));
+    const rl = [], ra = [], rb = [];
+    for (let y = 0; y < ah; y++) for (let x = 0; x < aw; x++)
+      if (y < mm || y >= ah - mm || x < mm || x >= aw - mm) { const i = y * aw + x; rl.push(L[i]); ra.push(A[i]); rb.push(B[i]); }
+    const muL = medianOf(rl), muA = medianOf(ra), muB = medianOf(rb);
+    const nv = Math.hypot(muA - 128, muB - 128) + 1e-6;
+    const hue = [(muA - 128) / nv, (muB - 128) / nv];
+
+    const quadFull = det.quad.map(p => [p[0] / s, p[1] / s]);
+    const provW = 640, provH = Math.round(provW * ASPECT);
+    const prov = warpQuad(fctx, full.width, full.height, quadFull, provW, provH, null);
+    const ins = trimInsets(prov, provW, provH, hue, nv, muL);
+
+    // map the tightened rectangle back through the provisional warp
+    const Hf = invert3(homography(windQuad(quadFull),
+      [[0, 0], [0, provH - 1], [provW - 1, provH - 1], [provW - 1, 0]]));
+    const back = (x, y) => {
+      const w_ = Hf[6] * x + Hf[7] * y + Hf[8];
+      return [(Hf[0] * x + Hf[1] * y + Hf[2]) / w_, (Hf[3] * x + Hf[4] * y + Hf[5]) / w_];
+    };
+    const L0 = ins.left, T0 = ins.top, R0 = provW - 1 - ins.right, B0 = provH - 1 - ins.bottom;
+    const tight = [back(L0, T0), back(L0, B0), back(R0, B0), back(R0, T0)];
+
+    setStatus("rendering…");
+    await nextFrame();
+    out = warpQuad(fctx, full.width, full.height, tight, OUT_W, OUT_H, lut);
+
+    const or = orientation(out, OUT_W, OUT_H);
+    if (or.flip) out = rotate180(out);
+    info.ratio = or.ratio;
+    if (or.ratio < 1.6) flags.push(`orientation uncertain (border ratio ${or.ratio.toFixed(2)}) — check it`);
+    const left = residualDesk(out, OUT_W, OUT_H);
+    const worst = Math.max(...Object.values(left));
+    if (worst > 15) {
+      const edge = Object.keys(left).find(k => left[k] === worst);
+      flags.push(`desk still on the ${edge} edge (~${worst}px)`);
+    }
+    info.cropped = true;
+  } else {
+    setStatus("more than one print — balancing only…");
+    await nextFrame();
+    const fd = fctx.getImageData(0, 0, full.width, full.height);
+    for (let p = 0; p < fd.data.length; p += 4) {
+      fd.data[p]     = lut[0][fd.data[p]];
+      fd.data[p + 1] = lut[1][fd.data[p + 1]];
+      fd.data[p + 2] = lut[2][fd.data[p + 2]];
+    }
+    out = fd;
+    info.cropped = false;
+    if (det.quad && det.blobs === 1 && det.aspect >= 1.40 && det.aspect <= 1.90)
+      flags.push(`couldn't fit one card (aspect ${det.aspect.toFixed(2)}) — left uncropped`);
+  }
+
+  return { out, flags, info, m0, gain };
+}
+
+function report(res) {
+  drawTo($("after"), res.out);
+  const fl = $("flags");
+  fl.innerHTML = "";
+  if (!res.flags.length) {
+    fl.innerHTML = `<div class="flag ok"><b>✓</b><span>${res.info.cropped
+      ? "cropped, straightened and turned upright" : "balanced (multiple prints, left whole)"}</span></div>`;
+  } else {
+    for (const f of res.flags)
+      fl.innerHTML += `<div class="flag"><b>!</b><span>${f}</span></div>`;
+  }
+  const rows = [
+    ["white before", res.m0.white.map(v => toSRGB(v).toFixed(0)).join(", ")],
+    ["white after", WHITE_TARGET.toFixed(1) + " (target)"],
+    ["black after", BLACK_TARGET.toFixed(1) + " (target)"],
+    ["gain", res.gain.map(v => v.toFixed(3)).join(", ")],
+    ["clipped", (res.m0.clipped * 100).toFixed(1) + "%"],
+  ];
+  if (res.info.cropped) {
+    rows.push(["aspect found", res.info.aspect.toFixed(3) + " (instax 1.593)"]);
+    rows.push(["border ratio", res.info.ratio.toFixed(2) + " (instax ~2.1)"]);
+    rows.push(["output", `${OUT_W} × ${OUT_H}`]);
+  } else {
+    rows.push(["prints seen", String(res.info.blobs)]);
+  }
+  $("stats").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+  $("stage").classList.add("on");
+}
+
+$("pick").addEventListener("change", async e => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  $("stage").classList.remove("on");
+  try {
+    const res = await process(file);
+    if (!res) return;
+    const c = document.createElement("canvas");
+    c.width = res.out.width; c.height = res.out.height;
+    c.getContext("2d").putImageData(res.out, 0, 0);
+    resultCanvas = c;
+    report(res);
+    setStatus("done — " + res.out.width + " × " + res.out.height);
+  } catch (err) {
+    setStatus("something went wrong: " + err.message);
+    console.error(err);
+  }
+  e.target.value = "";
+});
+
+$("rotate").addEventListener("click", () => {
+  if (!resultCanvas) return;
+  const ctx = resultCanvas.getContext("2d");
+  const img = rotate180(ctx.getImageData(0, 0, resultCanvas.width, resultCanvas.height));
+  ctx.putImageData(img, 0, 0);
+  drawTo($("after"), img);
+});
+
+$("save").addEventListener("click", () => {
+  if (!resultCanvas) return;
+  resultCanvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = resultName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setStatus("saved to Downloads as " + resultName);
+  }, "image/jpeg", 0.96);
+});
+</script>
+</body>
+</html>
