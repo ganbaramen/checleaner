@@ -36,6 +36,11 @@ python3 checleaner.py chekis/main/ --dry-run  # measure and report, write nothin
 
 ~10 s per photo. `report.csv` records every measurement and flag, including for
 files that passed — check it rather than assuming a clean run means clean output.
+Its `dest` column says `balanced` or `review` outright (derived from whether
+`flags` is empty, so it can't drift out of sync with where the file actually
+landed); `review/report.txt` lists just the flagged files and why, next to the
+photos themselves — meant to be readable without watching console output,
+which matters when a run is driven by an agent rather than a terminal.
 
 The phone app is opened directly in a browser; there is no build step. To test it
 headlessly, drive it with Playwright: load `file://.../checleaner.html`, `setInputFiles`

@@ -214,6 +214,23 @@ declined and it was left as an ordinary whole-frame multi.
 
 ---
 
+## report.csv gets a dest column, review/ gets a report.txt (2026-08-15)
+
+Reported gap: `review/` is where anything the pipeline isn't confident about
+goes, with a flag explaining why — but that only worked if you watched the
+per-file console line or knew that "empty `flags` in report.csv" means
+`balanced/`, nothing else marks it. Fine at a terminal, not fine when a run is
+driven by an agent and the flags/dest logic never gets explained to the
+person actually looking at the files afterward.
+
+`report.csv` now has an explicit `dest` column (`balanced` or `review`),
+derived from the same `flags`-empty check used to actually route the file, so
+it can't drift out of sync with reality. `review/report.txt` lists just the
+flagged files and their reasons, written into `review/` itself so it's next
+to the photos it's talking about rather than requiring a cross-reference.
+
+---
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

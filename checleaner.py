@@ -622,9 +622,12 @@ def run(args) -> int:
         print(f"  {name:<34} {r.kind:<7} -> {os.path.basename(dest_dir):<8} {note}", flush=True)
 
     _write_report(os.path.join(out_root, "report.csv"), files, results)
+    _write_review_notes(review_dir, files, results)
     n_review = sum(1 for r in results.values() if r.flags)
     print(f"\n{len(files) - n_review} in balanced/, {n_review} in review/")
     print(f"report: {os.path.join(out_root, 'report.csv')}")
+    if n_review:
+        print(f"review notes: {os.path.join(review_dir, 'report.txt')}")
     return 0
 
 
@@ -648,16 +651,37 @@ def _copy_exif(src, dest, w, h):
 def _write_report(path, files, results):
     with open(path, "w", newline="") as fh:
         wr = csv.writer(fh)
-        wr.writerow(["file", "kind", "white_before", "black_before", "gain",
+        # dest is derived (review iff flags), not tracked separately, so it can
+        # never drift out of sync with where the file actually landed
+        wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
                      "clipped_pct", "aspect", "fill", "border_ratio",
                      "align_tilt", "align_n", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
-            wr.writerow([name, r.kind, s.get("white_before"), s.get("black_before"),
+            dest = "review" if r.flags else "balanced"
+            wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
                          s.get("gain"), s.get("clipped_pct"), s.get("aspect"),
                          s.get("fill"), s.get("border_ratio"),
                          s.get("align_tilt"), s.get("align_n"), "; ".join(r.flags)])
+
+
+def _write_review_notes(review_dir, files, results):
+    """Plain-text summary dropped in review/ itself, next to the photos it
+    describes, so what needs a look is readable without cross-referencing
+    report.csv or console output -- which matters when a run is driven by an
+    agent and nobody's watching stdout live."""
+    flagged = [(name, results[name]) for name in files if results[name].flags]
+    with open(os.path.join(review_dir, "report.txt"), "w") as fh:
+        if not flagged:
+            fh.write("Nothing needs review.\n")
+            return
+        fh.write(f"{len(flagged)} file(s) need a look. Full detail in report.csv.\n\n")
+        for name, r in flagged:
+            fh.write(f"{name}\n")
+            for flag in r.flags:
+                fh.write(f"  - {flag}\n")
+            fh.write("\n")
 
 
 def main():
