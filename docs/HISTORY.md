@@ -940,6 +940,24 @@ Recorded as a new `report.csv` column, `desk_match`, and deliberately not as a
 flag: skipping the match makes the output more faithful, so there is nothing to
 review.
 
+### Ported to the phone app
+
+The white anchor half only — desk matching needs a folder-wide median and the
+app sees one photo at a time. `detectPrint()` returns a `paper` mask and now
+runs before the colour pass. Sweeping all 106 files through the page moved
+white by at most one sRGB unit on 10 of them, gain by ~1%, and nothing else at
+all — no kind, crop, size, window count or flag changed.
+
+Two things fell out of doing it. Blob ids were being numbered `blobs.length + 1`
+*before* the size test, so a rejected component handed its id to the next one
+and `label` had duplicates — harmless for the existing readers, not harmless for
+a mask keyed on it; ids are now one per component. And `tools/webdetect.py`
+reported "0 of 106 changed" for a change that demonstrably moved the colour,
+because it tracked only geometry. It now tracks `white` and `gain` too. That is
+the second time that tool has been caught blind by a field it wasn't recording
+(the first was output dimensions) — the lesson each time was to make the
+deliberate change first and check the tool *notices*.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

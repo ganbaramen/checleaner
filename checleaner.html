@@ -281,7 +281,7 @@ function toLab(data, w, h) {
 
 /* --------------------------------------------------------------- measuring */
 
-function measure(data, w, h) {
+function measure(data, w, h, paper) {
   const n = w * h;
   const lum = new Float32Array(n);
   for (let i = 0, p = 0; i < n; i++, p += 4)
@@ -293,27 +293,50 @@ function measure(data, w, h) {
   const sdLo  = percentile(sd, 25, stride);
   const lumLo = percentile(lum, 0.5, stride);
 
-  let wr = [], wg = [], wb = [];                      // white: bright, smooth, unclipped
   let br = 0, bg = 0, bb = 0, bn = 0;                 // black: darkest 0.5%
   let bright = 0, clipped = 0;
   for (let i = 0, p = 0; i < n; i++, p += 4) {
-    const R = data[p], G = data[p + 1], Bv = data[p + 2];
-    const mx = R > G ? (R > Bv ? R : Bv) : (G > Bv ? G : Bv);
+    const mx = Math.max(data[p], data[p + 1], data[p + 2]);
     if (lum[i] > lumHi) { bright++; if (mx >= 250) clipped++; }
-    if (lum[i] > lumHi && sd[i] < sdLo && mx < 250) { wr.push(R); wg.push(G); wb.push(Bv); }
-    if (lum[i] < lumLo) { br += LIN[R]; bg += LIN[G]; bb += LIN[Bv]; bn++; }
+    if (lum[i] < lumLo) { br += LIN[data[p]]; bg += LIN[data[p + 1]]; bb += LIN[data[p + 2]]; bn++; }
   }
-  if (wr.length < 400) {                              // tiny border: drop the smoothness test
-    wr = []; wg = []; wb = [];
+
+  // white: bright, smooth, unclipped -- kept as indices so the mask can be
+  // narrowed afterwards without rebuilding it
+  const white = (smooth, onPaper) => {
+    const idx = [];
     for (let i = 0, p = 0; i < n; i++, p += 4) {
-      const R = data[p], G = data[p + 1], Bv = data[p + 2];
-      const mx = Math.max(R, G, Bv);
-      if (lum[i] > lumHi && mx < 250) { wr.push(R); wg.push(G); wb.push(Bv); }
+      if (lum[i] <= lumHi) continue;
+      if (Math.max(data[p], data[p + 1], data[p + 2]) >= 250) continue;
+      if (smooth && sd[i] >= sdLo) continue;
+      if (onPaper && !onPaper[i]) continue;
+      idx.push(i);
     }
+    return idx;
+  };
+  let smooth = true;
+  let wi = white(true, null);
+  if (wi.length < 400) { smooth = false; wi = white(false, null); }   // tiny border
+  // Confine the anchor to the prints' own paper. "Brightest smooth region" only
+  // means "the paper border" while the background is darker than the border --
+  // that is a fact about the walnut desk, not about the pipeline. On a pale
+  // table the table wins, and the photo gets balanced so the furniture is
+  // 238.8. Fall back rather than trust a sliver: a median over a scrap of paper
+  // is noisier than the frame-wide read. Port of measure(..., paper=) -- see
+  // docs/PIPELINE.md § 1, where this is measured as a no-op on the walnut.
+  if (paper) {
+    const confined = white(smooth, paper);
+    if (confined.length >= 400) wi = confined;
   }
-  if (!wr.length || !bn) return null;
+  if (!wi.length || !bn) return null;
+
+  const chan = c => {
+    const v = new Array(wi.length);
+    for (let k = 0; k < wi.length; k++) v[k] = data[wi[k] * 4 + c];
+    return LIN[Math.round(medianOf(v))];
+  };
   return {
-    white: [LIN[Math.round(medianOf(wr))], LIN[Math.round(medianOf(wg))], LIN[Math.round(medianOf(wb))]],
+    white: [chan(0), chan(1), chan(2)],
     black: [br / bn, bg / bn, bb / bn],
     clipped: bright ? clipped / bright : 0,
   };
@@ -321,7 +344,7 @@ function measure(data, w, h) {
 
 /* Per-channel gain+offset in linear light, iterated because applying the
    transform moves the very pixels the anchors were measured from. */
-function solveLevels(data, w, h, m0) {
+function solveLevels(data, w, h, m0, paper) {
   const wt = LIN[Math.round(WHITE_TARGET)], bt = LIN[Math.round(BLACK_TARGET)];
   let W = [wt, wt, wt], B = [bt, bt, bt], gain = [1, 1, 1], off = [0, 0, 0];
   const scratch = new Uint8ClampedArray(data.length);
@@ -337,7 +360,9 @@ function solveLevels(data, w, h, m0) {
       scratch[p + 2] = lut[2][data[p + 2]];
       scratch[p + 3] = 255;
     }
-    const got = measure(scratch, w, h);
+    // same mask the targets were measured with, or the loop chases an anchor
+    // taken somewhere else and never converges
+    const got = measure(scratch, w, h, paper);
     if (!got) break;
     let done = true;
     for (let c = 0; c < 3; c++) {
@@ -547,9 +572,14 @@ function detectPrint(data, w, h) {
   const label = new Int32Array(n);          // 0 = background, else blob id (1-based)
   const stack = new Int32Array(n);
   const blobs = [];
+  let nextId = 0;
   for (let s = 0; s < n; s++) {
     if (!cleaned[s] || seen[s]) continue;
-    const id = blobs.length + 1;
+    // one id per component, whether or not it survives the size test below --
+    // numbering from blobs.length would hand a rejected component's id to the
+    // next one, and `label` is read back (countWindows, sheenFreeBox, the paper
+    // mask) as if ids were unique
+    const id = ++nextId;
     let top = 0, count = 0;
     let bx0 = w, by0 = h, bx1 = -1, by1 = -1;
     stack[top++] = s; seen[s] = 1; label[s] = id;
@@ -568,7 +598,7 @@ function detectPrint(data, w, h) {
     }
     if (count > 0.03 * n) blobs.push({ count, pts, id, bbox: [bx0, by0, bx1, by1] });
   }
-  if (!blobs.length) return { quad: null, blobs: 0, all: [], windows: 0 };
+  if (!blobs.length) return { quad: null, blobs: 0, all: [], windows: 0, paper: null };
 
   blobs.sort((a, b) => b.count - a.count);
   // Cut off any desk sheen the close welded onto a blob — but only for the
@@ -627,8 +657,17 @@ function detectPrint(data, w, h) {
     const hu = convexHull(blobs[i].pts), rc = minAreaRect(hu);
     if (polyArea(hu) / rc.area >= PRINT_FILL) nBlobs++;
   }
+  // Every print-sized blob as a flat mask, for measure()'s white anchor. All of
+  // them, not the glare-filtered `all` -- this matches Python's paper_mask(),
+  // which is built from _segment_prints' `big` before detect_all_prints does any
+  // filtering. Untrimmed too: the sheen cut serves the crop, and a sheen that
+  // reads as paper here would only be paper-coloured anyway.
+  const ids = new Set(blobs.map(b => b.id));
+  const paper = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (ids.has(label[i])) paper[i] = 1;
+
   return { quad: rect.quad, aspect: rect.aspect, fill: hullArea / rect.area,
-           solidity: closedArea / hullArea, blobs: nBlobs, all, windows };
+           solidity: closedArea / hullArea, blobs: nBlobs, all, windows, paper };
 }
 
 /* Returns { windows, closedArea } for the largest paper blob -- port of
@@ -1289,16 +1328,21 @@ async function process(file) {
   const sdata = sctx.getImageData(0, 0, aw, ah);
   drawTo($("before"), sdata);
 
-  setStatus("measuring white and black…");
-  await nextFrame();
-  const m0 = measure(sdata.data, aw, ah);
-  if (!m0) { setStatus("couldn't find a white border in this photo."); return null; }
-  const { gain, off } = solveLevels(sdata.data, aw, ah, m0);
-  const lut = buildLUT(gain, off);
-
+  // Detection runs first, before the colour pass, so measure() can take its
+  // white anchor from the paper rather than from whatever the prints happen to
+  // be lying on. Both work on this same uncorrected analysis frame, so the
+  // order between them is free.
   setStatus("finding the print…");
   await nextFrame();
   const det = detectPrint(sdata.data, aw, ah);
+
+  setStatus("measuring white and black…");
+  await nextFrame();
+  const m0 = measure(sdata.data, aw, ah, det.paper);
+  if (!m0) { setStatus("couldn't find a white border in this photo."); return null; }
+  const { gain, off } = solveLevels(sdata.data, aw, ah, m0, det.paper);
+  const lut = buildLUT(gain, off);
+
   const flags = [];
   if (m0.clipped > 0.15) flags.push(`white reference ${(m0.clipped * 100).toFixed(0)}% clipped — correction is a guess`);
   const gmax = Math.max(...gain), gmin = Math.min(...gain);

@@ -63,7 +63,8 @@ READ = """() => ({
         ? `${resultCanvas.width}x${resultCanvas.height}` : '-',
 })"""
 
-FIELDS = ["file", "kind", "crop", "size", "windows", "prints", "tilt", "flags"]
+FIELDS = ["file", "kind", "crop", "size", "white", "gain", "windows", "prints",
+          "tilt", "flags"]
 
 
 def summarise(name: str, out: dict) -> dict:
@@ -98,6 +99,10 @@ def summarise(name: str, out: dict) -> dict:
         "kind": kind,
         "crop": grab(r"crop shape(\S+?)(?:levelled|$)"),
         "size": out.get("size", "-"),
+        # the colour half. Without these a change to the white/black anchors
+        # diffs as "nothing changed" -- every geometry field is untouched by it.
+        "white": grab(r"white before([\d, ]+?)white after"),
+        "gain": grab(r"gain([\d., ]+?)clipped"),
         "windows": grab(r"photo windows(\d+)"),
         "prints": grab(r"prints seen(\d+)"),
         "tilt": grab(r"levelled(-?[\d.]+)°"),

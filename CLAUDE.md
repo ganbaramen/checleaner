@@ -104,9 +104,11 @@ python3 tools/webdetect.py --save /tmp/js <files…>        # write the correcte
 `--compare` prints only the files whose verdict moved, which is how you sweep
 before changing a JS threshold — the JS ones (`MULTI_WINDOWS`,
 `CARD_EDGE_SHARP`) are calibrated separately from Python's and can't be reasoned
-about from the Python side. It tracks output **dimensions** as well as the
-labels, because a geometry change routinely moves the pixels while every caption
-on the page stays identical.
+about from the Python side. It tracks output **dimensions**, **white** and
+**gain** as well as the labels: a geometry change routinely moves the pixels
+while every caption stays identical, and a colour change moves neither the
+pixels' count nor any label. Both gaps were found the same way — by making a
+change on purpose and watching the tool report nothing.
 
 Two things to know before concluding the app has hung: the page has three
 terminal states, not one (done, "couldn't find a white border", and thrown), and
@@ -121,13 +123,14 @@ errors loudly. There is still no *assertion* harness — see Next steps.
   silently de-matches the entire library. Both implementations must use the same
   numbers.
 - **The white anchor is measured on the prints' own paper**, not the whole frame
-  (`measure(..., paper=)`, `docs/PIPELINE.md` § 1). It is what makes the balance
-  independent of what the prints are lying on — frame-wide, a background brighter
-  than the paper border silently becomes the white reference. Confirmed a no-op
-  on the calibrated library (identical white on 137 of 140 files) precisely
-  because the walnut is dark; do not assume the next background will be. **Black
-  stays frame-wide** — on this desk the darkest 0.5% is desk shadow and the 2.2
-  calibration depends on it.
+  (`measure(..., paper=)` in both implementations, `docs/PIPELINE.md` § 1). It is
+  what makes the balance independent of what the prints are lying on —
+  frame-wide, a background brighter than the paper border silently becomes the
+  white reference. Confirmed a no-op on the calibrated library (identical white
+  on 137 of 140 files) precisely because the walnut is dark; do not assume the
+  next background will be. Detection therefore has to run *before* the colour
+  pass — that ordering is load-bearing. **Black stays frame-wide** — on this
+  desk the darkest 0.5% is desk shadow and the 2.2 calibration depends on it.
 - **All colour maths happens in linear light.** Gamma-space gain skews midtones.
 - **instax mini is 54 × 86 mm** → aspect 1.5926, output 1800 × 2867.
 - **Desk matching is secondary and damped** (strength 0.5, gamma clamped to
@@ -175,11 +178,13 @@ errors loudly. There is still no *assertion* harness — see Next steps.
 2. **Give `checleaner.html` a face detector for content reorientation.**
    Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
    (`countWindows()`), solidity, the desk-glare blob filter, the sheen trim
-   (`sheenFreeBox()`), and the lopsided-crop rule are all now ported (see
-   `docs/PIPELINE.md` §§ 3, 6) — window counts, `MULTI_WINDOWS` and
-   `CARD_EDGE_SHARP` are calibrated separately from Python's, since canvas image
-   decoding isn't pixel-identical to `cv2`'s. What's still desktop-only is
-   `content_rotation()`: the app
+   (`sheenFreeBox()`), the lopsided-crop rule, and the paper-confined white
+   anchor are all now ported (see `docs/PIPELINE.md` §§ 1, 3, 6) — window
+   counts, `MULTI_WINDOWS` and `CARD_EDGE_SHARP` are calibrated separately from
+   Python's, since canvas image decoding isn't pixel-identical to `cv2`'s.
+   Desk *matching* has never existed in the app and can't: the target is a
+   folder-wide median, and the app sees one photo at a time. What's still
+   desktop-only besides that is `content_rotation()`: the app
    offers manual ⟲/⟳/180° rotate buttons instead, since the offline
    single-file page can't ship a face model. Closing the gap would need a JS
    face detector (e.g. onnxruntime-web + the same YuNet model), which also

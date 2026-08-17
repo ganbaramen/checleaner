@@ -43,6 +43,14 @@ paper and buy nothing. It held on every pale surface in the library — a grey
 table stayed out of the mask — but a white tablecloth is the case that would
 break it.
 
+**Ported to `checleaner.html`.** `detectPrint()` now returns a `paper` mask and
+runs *before* the colour pass — both work on the same uncorrected analysis
+frame, so the order between them is free, and no rescaling is needed the way
+Python's `paper_mask()` needs it (detection at 1100 px, colour at 1400 px).
+Same no-op result: sweeping `chekis/main` through the page moved white by at
+most one sRGB unit on 10 of 106 files and gain by ~1%, with no file changing
+kind, crop, size, or flags.
+
 **Black is deliberately not confined.** On this desk the darkest 0.5% *is* desk
 shadow, and that is baked into every batch calibrated to 2.2; confining it moves
 8 files by 2–27%. It also isn't at risk: a background bright enough to break
