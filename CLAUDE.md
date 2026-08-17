@@ -116,6 +116,20 @@ it swallows JS exceptions while still showing a result — so a silent page erro
 looks like a clean run. `webdetect.py` waits on all three and reports page
 errors loudly. There is still no *assertion* harness — see Next steps.
 
+## Hosting
+
+`.github/workflows/pages.yml` publishes `checleaner.html` as the GitHub Pages
+site root, plus the `web/` PWA assets (manifest, service worker, icons), so the
+app installs to the home screen over HTTPS and registers a Web Share Target for
+the Android share sheet. The service worker caches the shell for offline use and
+catches the shared-image POST.
+
+The file at the repo root stays the single source of truth — **the workflow
+copies, it doesn't fork**, so edit `checleaner.html` and never the published
+copy. The `file://` path is unchanged by any of this: the PWA bits self-disable
+off http/https, which is why `tools/webdetect.py` can drive the local file
+directly.
+
 ## Invariants — do not change casually
 
 - **White target 238.8, black target 2.2** (sRGB, 0–255). These are absolute, not
@@ -179,12 +193,15 @@ errors loudly. There is still no *assertion* harness — see Next steps.
 
 ## Next steps, roughly in order of value
 
-1. **Extend the regression tests to `checleaner.html`.** `checleaner.py` is now
+1. **Extend the regression tests to `checleaner.html`.** `checleaner.py` is
    covered by `tests/test_pipeline.py` (synthetic fixtures asserting colour
-   targets, aspect, orientation, single-vs-multi). The phone app is still checked
-   by hand — port the same asserted numbers to a Playwright-driven check so both
-   implementations are safe to change. Optionally, add real-photo golden numbers
-   from `docs/HISTORY.md` to the opt-in tier.
+   targets, aspect, orientation, single-vs-multi); the phone app still has no
+   assertions. The driving half is already done — `tools/webdetect.py` loads the
+   page, feeds it files, and reports `kind`/`crop`/`size`/`white`/`gain`/
+   `aspect`/`fill`/`solidity`/`windows` — so what's left is feeding it the
+   synthetic fixtures and asserting on those numbers, rather than only diffing
+   two sweeps by hand. Optionally add real-photo golden numbers from
+   `docs/HISTORY.md` to the opt-in tier.
 2. **Give `checleaner.html` a face detector for content reorientation.**
    Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
    (`countWindows()`), solidity, the desk-glare blob filter, the sheen trim
@@ -198,16 +215,16 @@ errors loudly. There is still no *assertion* harness — see Next steps.
    offers manual ⟲/⟳/180° rotate buttons instead, since the offline
    single-file page can't ship a face model. Closing the gap would need a JS
    face detector (e.g. onnxruntime-web + the same YuNet model), which also
-   means solving how a `file://` page loads WASM offline — see item 4.
-3. **Split multi-print photos into separate crops.** Still balanced as one
+   means solving how a `file://` page loads WASM offline (the hosted build has
+   a service worker to lean on; see Hosting).
+3. **Give `checleaner.html` a real external-contour area**, so its `solidity`
+   stops reading a staggered row as a clean card — `20260221_153435918` measures
+   0.995/0.998 there against Python's 0.863/0.793. Until then the app's window
+   count is the only thing keeping such a row out of the single-card path, which
+   is why `MULTI_WINDOWS` can't be split the way Python's now is, and why two
+   genuine singles come out levelled rather than cropped (`docs/PIPELINE.md`
+   § 3). Fixing this unblocks that split and those two files together.
+4. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
    into one blob.
-4. *(done)* **Hosted over HTTPS on GitHub Pages** — `.github/workflows/pages.yml`
-   publishes `checleaner.html` as the site root plus the `web/` PWA assets
-   (manifest, service worker, icons), so it installs to the home screen and
-   registers a Web Share Target for the Android share sheet. The service worker
-   caches the shell for offline use and catches the shared-image POST; the
-   `file://` path is unchanged (the PWA bits self-disable off http/https). The
-   file at the repo root stays the single source of truth — the workflow copies,
-   it doesn't fork.

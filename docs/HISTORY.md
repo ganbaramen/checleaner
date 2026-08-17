@@ -309,7 +309,8 @@ just the balanced whole frame, by design, so their sideways/upside-down
 appearance is simply how the phone captured them.
 
 Actually fixing the landscape-print case needs per-print detection (splitting
-merged blobs into individual cards, next steps item 3 in `CLAUDE.md`) so each
+merged blobs into individual cards -- the "split multi-print photos"
+next step in `CLAUDE.md`) so each
 print's own content -- not the merged group's incidental shape -- can be
 reasoned about.
 
@@ -363,7 +364,8 @@ and lands in `review/` with a clear reason instead of a distorted crop.
 
 ## Splitting multi-print photos into per-print crops: tried, backed out (2026-08-16)
 
-Attempted Next-steps item 3 -- carve a merged multi-print blob into one crop
+Attempted the "split multi-print photos" next step -- carve a merged
+multi-print blob into one crop
 per print (`split_prints()` and friends: window-hole detection, union-find
 fragment clustering, dual portrait/landscape hypothesis). It ran end to end and
 handled real overlap, but was reverted, for two reasons:
