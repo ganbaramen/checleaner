@@ -135,6 +135,20 @@ Three details are load-bearing:
   the blob standing; if less than `SHEEN_KEEP_MIN` of the bounding box survives,
   the edge test has rejected real cards and the whole answer is discarded (one
   photo kept a single 0.5% piece and its crop collapsed).
+- **Only the crop path sees the trimmed box.** `_sheen_free_bbox()` is called
+  from `detect_all_prints()`, never from `detect_print()`. Feeding it to the
+  single-vs-multi decision as well turns a 3-print pile's trimmed box into a
+  1.88 slab, which reads as a near-miss single instead of the 1.30 multi it is.
+
+Ported to `checleaner.html` as `sheenFreeBox()`, with two JS-specific notes.
+Its `CARD_EDGE_SHARP` is **105**, not 450: the JS Scharr runs on a canvas-decoded
+grey at a different blur, and measured against Python's own scores on the same
+photos it comes out ~0.23× — sheen 51–70 against a card's 133–356. The scores
+must be taken on a *lightly* blurred grey, not on the heavily blurred `L` the
+segmentation uses; on that one the two classes ran 53–281 with no gap at all.
+And the blob outline is **clipped** against the box (Sutherland-Hodgman) rather
+than clamped into it — clamping folds every outlying corner onto the box's sides,
+squaring off a tilted pile that the rectangle fit then has to circumscribe.
 
 Six *interior* statistics were measured first and every one of them overlaps —
 **don't reach for these again**: brightness (sheen is as bright as paper;
@@ -237,6 +251,13 @@ solidity to ~0.56 and demoting it to a flagged near-miss instead of an
 auto-crop — accepted as the safe failure direction (a flag costs a look;
 a wrongly-accepted grid costs a mangled photo), not chased further.
 
+Two of the 106 files in `chekis/main/` give the phone app no blob at all
+("couldn't find a white border in this photo") where Python segments them
+fine: `PXL_20260128_053032673.MP.jpg` and `PXL_20260630_140740030.jpg`. Same
+decoding difference, at the other end — the JS mask never reaches the 3 % area
+floor. Long-standing, unchanged by the § 6 port, and left alone: the app tells
+the user plainly and does nothing destructive.
+
 ## 4. Crop
 
 Perspective-transform the quad onto an 1800 × 2867 canvas. Not a rotated-rectangle
@@ -326,8 +347,10 @@ A multi-print photo isn't cropped to a card shape, but it can still be
 straightened and centred: `align_multi()` in `checleaner.py`.
 
 The **levelling, best-fit crop, and margin recentre** in this section are all
-ported to `checleaner.html` (`alignMulti()` + `paperCenter()`, same tilt maths,
-`CROP_ASPECTS` list, and footprint check). The **content reorientation** half
+ported to `checleaner.html` (`alignMulti()` + `paperBbox()`, same tilt maths,
+`CROP_ASPECTS` list, hull-based extent, slack-capped nudge, and the lopsided
+rule), as is the glare filter on secondary blobs (`PRINT_FILL`) and the sheen
+trim of § 3 (`sheenFreeBox()`). The **content reorientation** half
 below is desktop-only — it needs a face model the offline single-file app
 can't ship — so the phone app instead offers manual ⟲/⟳/180° rotate buttons to
 stand a levelled result upright by hand. One consequence: `checleaner.html`
@@ -524,8 +547,8 @@ other multi/aligned/`single?` frames untouched.
 **Model.** YuNet, ~230 KB, cached under `~/.cache/checleaner/` and fetched from
 the OpenCV Zoo on first use (override the path with `$CHEKI_FACE_MODEL`, or
 disable the whole step with `--no-reorient`). This is the pipeline's one learned
-component; everything else is classic CV. It lives only in `checleaner.py` — the
-phone app doesn't do multi-print alignment at all yet.
+component; everything else is classic CV. It lives only in `checleaner.py`; the
+phone app does the rest of the alignment but stands the result upright by hand.
 
 ---
 

@@ -131,10 +131,12 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
    from `docs/HISTORY.md` to the opt-in tier.
 2. **Give `checleaner.html` a face detector for content reorientation.**
    Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
-   (`countWindows()`), and solidity are all now ported (see `docs/PIPELINE.md`
-   §§ 3, 6) — window counts and the `MULTI_WINDOWS` threshold are calibrated
-   separately from Python's, since canvas image decoding isn't pixel-identical
-   to `cv2`'s. What's still desktop-only is `content_rotation()`: the app
+   (`countWindows()`), solidity, the desk-glare blob filter, the sheen trim
+   (`sheenFreeBox()`), and the lopsided-crop rule are all now ported (see
+   `docs/PIPELINE.md` §§ 3, 6) — window counts, `MULTI_WINDOWS` and
+   `CARD_EDGE_SHARP` are calibrated separately from Python's, since canvas image
+   decoding isn't pixel-identical to `cv2`'s. What's still desktop-only is
+   `content_rotation()`: the app
    offers manual ⟲/⟳/180° rotate buttons instead, since the offline
    single-file page can't ship a face model. Closing the gap would need a JS
    face detector (e.g. onnxruntime-web + the same YuNet model), which also
