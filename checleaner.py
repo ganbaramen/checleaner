@@ -379,8 +379,23 @@ def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
     seg = _segment_prints(path, size)
     if seg is None:
         return []
-    dets = (_blob_detection(seg["labels"], idx, seg["sc"]) for idx in seg["big"])
-    return [d for d in dets if d is not None]
+    dets = [d for d in (_blob_detection(seg["labels"], idx, seg["sc"]) for idx in seg["big"])
+            if d is not None]
+    # Desk glare gets its own blob here just as it does in detect_print, and it
+    # is worse in this direction: align_multi crops around the *union* of every
+    # blob, so one bright patch off in a corner drags the crop out to cover it
+    # and the whole photo declines as uncroppable.
+    #
+    # Rectangularity alone can't sort this out, because a *pile* of scattered
+    # prints is one blob that legitimately fills its bounding rect poorly (0.844
+    # on one of these -- barely above the glare's 0.815). Size alone can't
+    # either, since a lone card really can be small in frame. Together they can:
+    # a real card is always rectangular, and a real pile is never small. So keep
+    # a blob if it is either substantial next to the biggest one or card-shaped;
+    # the glare that started this was 10% of the largest blob at fill 0.815.
+    biggest = max(d.area for d in dets)
+    return [d for d in dets
+            if d.area >= 0.25 * biggest or d.fill >= PRINT_FILL] or dets
 
 
 def count_windows(path: str, size: int = 1400) -> int | None:
@@ -1097,7 +1112,13 @@ def run(args) -> int:
                 # folded into the alignment warp, because the crop shape is
                 # picked from CROP_ASPECTS for the final orientation -- turning
                 # after cropping would flip a chosen 16:9 into 9:16
-                turn = 0 if args.no_reorient else content_rotation(img)
+                # ...read off the *uncorrected* frame: the face model wants a
+                # naturally exposed photo, and pushing the whites to 238.8 first
+                # costs it detections (one frame scored 2 faces at 1.81 raw but
+                # only 1 at 0.64 corrected, and so turned the wrong way). Every
+                # known-orientation file agrees on both, so this only adds.
+                turn = (0 if args.no_reorient else
+                        content_rotation(cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR)))
                 if near_miss:
                     r.kind = "single?"
                     r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "

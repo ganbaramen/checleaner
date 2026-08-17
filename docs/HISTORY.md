@@ -628,6 +628,49 @@ Reclassification across the whole library was verified file by file at each
 step: the glare fix moved exactly the four cards, and the corner fit moved
 exactly the two, with nothing else changing.
 
+## Glare in detect_all_prints, and reorienting off the raw frame (2026-08-16)
+
+Follow-up after the batch above: three of the files I had written off as
+"prints fill the frame, can't be centred" were nothing of the sort, and the
+correction was worth having.
+
+**115252553 declined because of desk glare, not geometry.** Its three prints sit
+in the middle of plenty of desk; a bright reflection in the bottom-right corner
+was segmenting as a second blob (aspect 2.60, fill 0.815), and since
+`align_multi()` crops around the union of every blob `detect_all_prints()`
+returns, the crop had to stretch to that corner and no aspect fitted. The
+`PRINT_FILL` filter added earlier only guarded `detect_print()`'s blob *count*.
+Applying plain rectangularity here first made things worse -- a scattered pile is
+one blob at fill 0.844, barely above that glare's 0.815, so the filter ate the
+prints and the fallback returned everything unchanged. Keeping a blob when it is
+either >= 25% of the largest blob's area *or* card-shaped works: a real card is
+always rectangular and a real pile is never small. 115252553 now aligns 3:4 with
+even margins.
+
+**155935560 really does run off the frame** -- its bottom-left prints are cut by
+the left edge and the bottom row reaches the bottom edge -- so declining is
+correct there, and the earlier claim was only accidentally right.
+
+**184109322 turned the wrong way because the face model was reading the balanced
+frame.** `content_rotation()` was being handed the colour-corrected image;
+pushing the whites to 238.8 cost it detections, and this photo scored 2 faces at
+1.81 on the raw frame against 1 at 0.64 corrected -- enough to pick 180 over the
+correct 270. It now reads the uncorrected frame. Swept every multi-print photo in
+the library: exactly 1 of 75 changes (this one), and all eight files with a known
+correct orientation agree on both inputs.
+
+**Still unfixed: glare merged into the print blob** (130131692, 142612680,
+145119616). When the segmentation close bridges a print to an adjacent sheen they
+become one blob, so no per-blob filter applies, and the crop inherits the sheen
+as a band of desk on one side. The sheen is as bright as paper (sweeping the
+threshold to `L > 0.85 x p99` barely moved the box) and on a smooth desk as
+smooth as paper, so neither brightness nor local variance separates them.
+Anchoring the crop on photo windows does fix these three, but on a twelve-print
+pile only 2 of ~12 windows were detected -- bright print content merges its window
+into the border -- which would have collapsed that crop to a fraction of the pile
+and silently cut prints off. Not shipped: an extra band of desk is a far better
+failure than a cut print.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

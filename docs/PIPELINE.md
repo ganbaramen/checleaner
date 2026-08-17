@@ -101,6 +101,28 @@ though: those blobs measured fill 0.78–0.82 against a real card's 0.99. Only
 secondary blobs at `fill ≥ PRINT_FILL` (0.90) count toward the total, so the
 largest blob always counts and a highlight never does.
 
+`detect_all_prints()` has to drop glare too, and more urgently: `align_multi()`
+crops around the **union** of every blob it returns, so one bright patch in a
+corner drags the crop out to cover it and the photo declines as uncroppable.
+Rectangularity alone can't decide it there, because a *pile* of scattered prints
+is a single blob that fills its own bounding rect poorly — 0.844 on one photo,
+barely above that photo's glare at 0.815. Size alone can't either, since a lone
+card really can be small in frame. Together they can: a real card is always
+rectangular, and a real pile is never small. A blob is kept if it is either
+≥ 25% of the largest blob's area **or** `fill ≥ PRINT_FILL`.
+
+**Glare merged *into* the print blob is the case none of this catches.** When the
+segmentation close bridges a print to an adjacent sheen, the two become one blob
+and no per-blob filter applies. Measured on the photos where it happens, the
+sheen is as bright as paper (a threshold sweep to `L > 0.85 × p99` barely moved
+the bounding box) and, on a smooth desk, as smooth as paper — so neither
+brightness nor a local-variance test separates them. Anchoring the crop on photo
+windows instead does fix those files, but it breaks worse ones: on a twelve-print
+pile only 2 windows were detected (bright print content merges its window into
+the border), collapsing the crop to a fraction of the pile. Left unfixed rather
+than shipped: it costs some desk margin on one side of an aligned crop, where the
+window-anchored version would have silently cut prints off.
+
 **Corners, not a bounding rectangle.** A card photographed at an angle is a
 trapezoid, and `minAreaRect` can only circumscribe it — so it reads too wide
 (real cards measured 1.485 and 1.506 against instax's 1.593, falling out of the
@@ -376,10 +398,16 @@ The lesson was that card *geometry* can't answer this — you have to read the
 ### Standing the frame upright from content (faces)
 
 Geometry gives level; it can't give up. So `content_rotation()` reads the
-content to choose the remaining quarter or half turn, which is decided on the
-balanced frame *before* alignment and folded into `align_multi()`'s warp (so
-the `CROP_ASPECTS` shape is picked for the final orientation — see the crop
-paragraph in § 6); when alignment declines, the whole frame is turned instead. Chekis are photographs of people, so the signal is faces: score
+content to choose the remaining quarter or half turn, which is decided *before*
+alignment and folded into `align_multi()`'s warp (so the `CROP_ASPECTS` shape is
+picked for the final orientation — see the crop paragraph in § 6); when alignment
+declines, the whole frame is turned instead. It reads the **uncorrected** frame:
+the face model wants a naturally exposed photo, and balancing the whites to 238.8
+first costs it detections — one frame scored 2 faces at 1.81 raw but only 1 at
+0.64 corrected, and turned the wrong way as a result. Across every
+multi-print photo in the library the two inputs agree on all but that one, and
+every file with a known correct orientation agrees on both, so this only adds.
+Chekis are photographs of people, so the signal is faces: score
 each of the four 90° turns by summed face confidence (OpenCV's YuNet detector)
 and take the turn that stands the most faces upright. This is the same reason
 `orient()` reads a single card's window instead of its geometry — the picture
