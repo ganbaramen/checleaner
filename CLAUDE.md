@@ -18,6 +18,7 @@ checleaner/
   docs/PIPELINE.md       the algorithm, why each step is the way it is
   docs/HISTORY.md        every batch processed, with before/after measurements
   tools/detect.py        fast detection-only preview for named files (no colour pass)
+  tools/webdetect.py     the same, for checleaner.html — drives the page under Playwright
   tests/test_pipeline.py regression tests: colour targets, aspect, orientation, single-vs-multi
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
@@ -65,6 +66,12 @@ single-card hit (warped from the raw photo — colour never moves a pixel) so yo
 can eyeball orientation. It reuses `build_parser()`'s default thresholds so the
 preview can't drift from a real run.
 
+`--sheen` adds the numbers behind `CARD_EDGE_SHARP`: every paper piece in the
+blob with its own boundary sharpness, and the trimmed box that results. That
+threshold is the one you can't check by looking at a crop — card and sheen both
+yield a plausible rectangle — so read the gap between the two classes instead of
+assuming it. It's also the ground truth the JS port is calibrated against.
+
 `report.csv` records every measurement and flag, including for files that
 passed — check it rather than assuming a clean run means clean output. Its
 `dest` column says `balanced` or `review` outright (derived from whether
@@ -81,10 +88,31 @@ on `chekis/main/` when it's present and skips otherwise. Run it standalone
 (`python3 tests/test_pipeline.py`, needs only checleaner's own deps) or under
 `pytest tests/`. Run it after any change to the maths, not just the geometry.
 
-The phone app is opened directly in a browser; there is no build step. To test it
-headlessly, drive it with Playwright: load `file://.../checleaner.html`, `setInputFiles`
-on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
-`#stats`. There is no assertion harness for it yet — see Next steps.
+The phone app is opened directly in a browser; there is no build step. To test
+it headlessly, use `tools/webdetect.py` — the JS counterpart to
+`tools/detect.py`. It drives the real page under Playwright (a dev-only
+dependency: `pip install playwright && playwright install chromium`) and prints
+the same kind of per-file verdict:
+
+```bash
+python3 tools/webdetect.py chekis/main/*.jpg              # sweep, one line each
+python3 tools/webdetect.py --csv before.csv chekis/main/*.jpg
+python3 tools/webdetect.py --csv after.csv --compare before.csv chekis/main/*.jpg
+python3 tools/webdetect.py --save /tmp/js <files…>        # write the corrected frames
+```
+
+`--compare` prints only the files whose verdict moved, which is how you sweep
+before changing a JS threshold — the JS ones (`MULTI_WINDOWS`,
+`CARD_EDGE_SHARP`) are calibrated separately from Python's and can't be reasoned
+about from the Python side. It tracks output **dimensions** as well as the
+labels, because a geometry change routinely moves the pixels while every caption
+on the page stays identical.
+
+Two things to know before concluding the app has hung: the page has three
+terminal states, not one (done, "couldn't find a white border", and thrown), and
+it swallows JS exceptions while still showing a result — so a silent page error
+looks like a clean run. `webdetect.py` waits on all three and reports page
+errors loudly. There is still no *assertion* harness — see Next steps.
 
 ## Invariants — do not change casually
 

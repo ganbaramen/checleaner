@@ -28,8 +28,10 @@ import sys
 import argparse
 
 import cv2
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import checleaner
 from checleaner import (build_parser, detect_print, detect_all_prints,
                         align_multi, warp, orient, trim_desk, CARD_SOLIDITY_MIN)
 
@@ -51,12 +53,52 @@ def classify(det, d) -> str:
     return "single?" if near_miss else "multi"
 
 
+def sheen_report(path: str) -> str:
+    """Every paper piece in the biggest blob with its own boundary sharpness.
+
+    `CARD_EDGE_SHARP` is the one threshold that can't be sanity-checked from a
+    crop: it decides which pieces of a blob are card and which are desk sheen,
+    and both answers produce a plausible-looking rectangle. This prints the
+    numbers the decision is actually made on -- area and mean Scharr magnitude
+    per piece, then the box that comes out -- so the gap between the two classes
+    can be seen rather than assumed. It is also the ground truth the JS port is
+    calibrated against: checleaner.html scores the same pieces about 0.23x these
+    values, which is where its own 105 comes from (docs/PIPELINE.md § 3).
+    """
+    seg = checleaner._segment_prints(path)
+    if seg is None:
+        return "no segmentation"
+    idx = seg["big"][0] if seg["big"] else 1
+    blob = seg["labels"] == idx
+    raw = seg["raw"] & blob
+    k = np.ones((2 * checleaner.SHEEN_ERODE + 1,) * 2, np.uint8)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(
+        cv2.erode(raw.astype(np.uint8), k), 8)
+    pieces = []
+    for i in range(1, n):
+        area = int(stats[i, cv2.CC_STAT_AREA])
+        if area < checleaner.SHEEN_MIN_AREA * blob.size:
+            continue
+        grown = ((cv2.dilate((lbl == i).astype(np.uint8), k) > 0) & raw).astype(np.uint8)
+        rim = (cv2.dilate(grown, np.ones((3, 3), np.uint8)) - grown) > 0
+        if not rim.any():
+            continue
+        score = float(seg["edge"][rim].mean())
+        pieces.append(f"{area}px@{score:.0f}"
+                      + ("" if score >= checleaner.CARD_EDGE_SHARP else "*"))
+    box = checleaner._sheen_free_bbox(seg, idx)
+    return (f"box={box if box else 'none (blob stands)'} "
+            f"pieces=[{', '.join(pieces)}]  (* = read as sheen)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("files", nargs="+", help="image files to inspect")
     ap.add_argument("--crop", metavar="DIR",
                     help="warp+orient each single-card hit into DIR (raw colour) to eyeball orientation")
+    ap.add_argument("--sheen", action="store_true",
+                    help="also show each paper piece's boundary sharpness and the trimmed box")
     args = ap.parse_args()
 
     d = build_parser().parse_args(["."])   # the CLI's own default thresholds
@@ -75,6 +117,8 @@ def main() -> int:
             extra = f"  {len(dets)} blobs, {'level' if aligned is not None else 'whole'}"
         print(f"{name:<38} {kind:<8} n_blobs={det.n_blobs} "
               f"aspect={det.aspect:.3f} fill={det.fill:.3f} solidity={det.solidity:.3f}{extra}")
+        if args.sheen:
+            print(f"{'':<38} {sheen_report(path)}")
         if kind == "single" and args.crop:
             img = cv2.imread(path)
             quad, _ = trim_desk(img, det.quad)
