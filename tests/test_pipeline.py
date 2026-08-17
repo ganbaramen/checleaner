@@ -430,6 +430,50 @@ def test_content_rotation_no_ops_without_a_detector():
         checleaner._FACE_DET = saved
 
 
+def test_real_sheen_is_cut_off_the_blob():
+    """A desk sheen welded onto a print by the segmentation close used to swell
+    the blob -- and every crop drawn from it -- across a band of desk.
+    _sheen_free_bbox tells the two apart by how each ends: a card's edge is
+    crisp, a sheen's fades. Each of these blobs must lose a real slice, and a
+    pile with no sheen must keep its box (that one is the guard against the test
+    eating real cards)."""
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    # file -> smallest fraction of the blob's width/height the trim should remove
+    sheened = {"PXL_20260202_130131692.MP.jpg": 0.20,
+               "PXL_20260205_142612680.MP.jpg": 0.20}
+    checked = 0
+    for name, want in sheened.items():
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        seg = checleaner._segment_prints(path, 1100)
+        idx = max(seg["big"], key=lambda i: seg["stats"][i, cv2.CC_STAT_AREA])
+        ys, xs = np.where(seg["labels"] == idx)
+        box = checleaner._sheen_free_bbox(seg, idx)
+        assert box is not None, f"{name}: no sheen-free box"
+        x0, x1, y0, y1 = box
+        shrink = max(1 - (x1 - x0) / (xs.max() - xs.min()),
+                     1 - (y1 - y0) / (ys.max() - ys.min()))
+        assert shrink >= want, f"{name}: only trimmed {shrink:.0%}, want >= {want:.0%}"
+
+    clean = os.path.join(folder, "PXL_20260803_041037832.MP.jpg")
+    if os.path.exists(clean):
+        checked += 1
+        seg = checleaner._segment_prints(clean, 1100)
+        idx = max(seg["big"], key=lambda i: seg["stats"][i, cv2.CC_STAT_AREA])
+        ys, xs = np.where(seg["labels"] == idx)
+        box = checleaner._sheen_free_bbox(seg, idx)
+        if box is not None:      # None is fine: the blob stands
+            x0, x1, y0, y1 = box
+            assert (x1 - x0) >= 0.9 * (xs.max() - xs.min()), "trimmed a clean pile's width"
+            assert (y1 - y0) >= 0.9 * (ys.max() - ys.min()), "trimmed a clean pile's height"
+    if checked == 0:
+        skip("none of the sheen reference photos are present")
+
+
 def test_real_aligned_crops_have_balanced_margins():
     """align_multi recentres on the true paper extent, so opposite desk margins
     come out roughly equal even when the detection blob overshoots the prints at

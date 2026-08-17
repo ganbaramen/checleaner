@@ -711,6 +711,70 @@ This is also the first piece of the window-detection work: `_window_tilts()`
 extracts per-window rectangles, which is the geometry the remaining sheen
 problems need.
 
+## Sheen-in-blob fixed by boundary sharpness (2026-08-16)
+
+The three files left carrying a band of desk (130131692, 142612680, 155935560)
+all had the same cause: the segmentation's 43-px close welds an adjacent desk
+sheen onto a print, so the blob -- and every crop drawn from it -- swells past
+the cards.
+
+The answer turned out to be **how each piece of paper ends**, not what it looks
+like inside. A card has a crisp edge against the desk; a sheen fades into it.
+Splitting the unclosed paper into pieces and scoring each piece's own boundary
+by mean Scharr magnitude separates them cleanly: sheen 235-350, cards 594-1511,
+with `CARD_EDGE_SHARP` = 450 in open space between. `_sheen_free_bbox()` returns
+the blob's bounding box with the soft-edged pieces cut off; all three files now
+crop tight to their prints with even margins.
+
+Three details were needed to make it safe. Pieces have to be eroded apart and
+then measured *grown back*, because an eroded piece's boundary sits in flat paper
+and scores low whatever it is. Only a bounding box is used -- the rectangle is
+still fitted to the closed blob trimmed to that box, since re-fitting to the
+fragmented raw paper moves the quad even at ~0% trim (this showed up as two files
+shifting for no reason). And if less than `SHEEN_KEEP_MIN` (40%) of the bounding
+box survives, the answer is discarded: one photo kept a single 0.5%-area piece
+and its crop collapsed to nothing.
+
+Window detection improved along the way too. Reading windows off the *unclosed*
+paper mask finds far more than reading holes out of the closed one (9 against 2
+on a twelve-print pile, 9 against 5 on another), because the close exists
+precisely to fill windows and only the largest survive it.
+
+Six *interior* statistics were measured before landing on the boundary, and every
+one of them overlaps -- recorded so nobody repeats them:
+
+1. **Brightness** -- sheen is as bright as paper; sweeping to `L > 0.85 x p99`
+   barely moved the bounding box.
+2. **Local variance** -- on a smooth desk the sheen is as smooth as a border.
+   Fixes 145119616, does nothing for 130131692.
+3. **Edge-coverage trim** -- already shipped for thin fringes (7% coverage);
+   these sheens run 41-64%, and raising the threshold to reach them trims 26 px
+   of real prints off a staggered pile.
+4. **Keep unclosed-paper components touching an enclosed window** -- fixed
+   130131692 (x 827 -> 632) and 142612680 (792 -> 604), but trimmed 47%, 41%,
+   33% and 20% off four files whose cards' windows went undetected, three of
+   which then declined outright.
+5. **Anchor on any dark region inside the blob** -- no regressions, no fixes: the
+   sheen touches an inter-card gap and survives.
+6. **Anchor on photo-shaped dark regions only** -- still trimmed 305 px and
+   325 px off two good files.
+
+The populations overlap on every statistic tried: keep-ratio 0.63-0.77 for the
+correct trims against 0.31-0.84 for the wrong ones; dark fraction in the trimmed
+strip 0.34-0.40 against 0.42-0.48; dropped-lobe area 3.4x the median window
+against 4.8x. Two files also regressed at ~0% trim, which pinned a second
+problem: refitting the rectangle to the *fragmented* unclosed mask moves the quad
+even when nothing is removed, so any future version must trim the closed blob
+rather than re-fit to raw paper.
+
+They all fail for one reason: windows are found for only some cards, so "paper
+not near a window" is not "not a card". The boundary test works precisely
+because it never has to find every window.
+
+Verified across the library: declines stay at 3 (the same three as before, all
+frame-filling), no previously-good crop moved, and the twelve spot-checked
+aligned files are unchanged. 18 tests pass.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

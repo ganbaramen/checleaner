@@ -81,6 +81,18 @@ WINDOW_RECT_MIN = 0.75
 # How many trustworthy windows it takes before their angle is used for the
 # frame's tilt instead of the blob rectangles'. See _dominant_tilt.
 MIN_TILT_WINDOWS = 2
+# Mean Scharr magnitude along a paper piece's own boundary, above which it ends
+# crisply enough to be a card rather than a desk sheen fading out. Sheen scored
+# 235-350 across the library against a card's 594-1511. See _sheen_free_bbox.
+CARD_EDGE_SHARP = 450
+# Erosion (analysis-scale px) used to part pieces of paper that merely touch,
+# undone before each is measured. See _sheen_free_bbox.
+SHEEN_ERODE = 3
+# Smallest paper piece, as a fraction of the frame, worth judging at all.
+SHEEN_MIN_AREA = 0.002
+# How much of the blob's bounding box must survive the sheen test for its answer
+# to be believed at all. See _sheen_free_bbox.
+SHEEN_KEEP_MIN = 0.40
 
 
 # ---------------------------------------------------------------- colour space
@@ -243,13 +255,68 @@ def _segment_prints(path: str, size: int = 1100):
     hi = np.percentile(L, 99)
     chroma = np.hypot(A - 128, B - 128)
     mask = ((L > 0.62 * hi) & (chroma < 16)).astype(np.uint8) * 255
+    # The same test before the close bridges anything, plus the edge strength of
+    # the frame -- both only for _sheen_free_bbox, which needs to see the paper
+    # as separate pieces and to judge how crisply each one ends.
+    raw = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((9, 9), np.uint8)) > 0
+    gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0).astype(np.float32)
+    edge = np.hypot(cv2.Scharr(gray, cv2.CV_32F, 1, 0), cv2.Scharr(gray, cv2.CV_32F, 0, 1))
     # close wide enough to bridge the photo window, then open to shed highlights
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((43, 43), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((17, 17), np.uint8))
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     big = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] > 0.03 * H * W]
-    return dict(labels=labels, stats=stats, big=big, sc=sc)
+    return dict(labels=labels, stats=stats, big=big, sc=sc, raw=raw, edge=edge)
+
+
+def _sheen_free_bbox(seg, idx: int):
+    """The blob's bounding box with any bridged-on desk sheen cut off, or None.
+
+    A sheen beside the prints is bright and near-neutral enough to segment, and
+    the 43-px close then welds it to a card, so the blob -- and every crop drawn
+    from it -- swells to cover desk. What finally separates the two is how each
+    piece *ends*: a card has a crisp edge against the desk, a sheen fades into
+    it. Measured across the library, sheen boundaries score 235-350 mean Scharr
+    magnitude against a card's 594-1511, so `CARD_EDGE_SHARP` sits in open space
+    between them. Six interior statistics were tried first and all overlap --
+    brightness, smoothness, coverage, and three ways of anchoring on photo
+    windows; see docs/PIPELINE.md § 3 before reaching for another.
+
+    Only a bounding box is returned, deliberately. The rectangle still gets
+    fitted to the *closed* blob (trimmed to this box): re-fitting it to the raw
+    paper instead moves the quad even when nothing is removed, because that mask
+    is fragmented, which showed up as two files shifting on a ~0% trim.
+    """
+    blob = seg["labels"] == idx
+    raw = seg["raw"] & blob
+    k = np.ones((2 * SHEEN_ERODE + 1,) * 2, np.uint8)
+    # Erode to part pieces that merely touch, then measure each piece grown back
+    # to its true extent -- the boundary of an eroded piece sits in flat paper
+    # and scores low no matter what it is.
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(cv2.erode(raw.astype(np.uint8), k), 8)
+    area_min = SHEEN_MIN_AREA * blob.size
+    keep = np.zeros(blob.shape, bool)
+    for i in range(1, n):
+        if stats[i, cv2.CC_STAT_AREA] < area_min:
+            continue
+        grown = ((cv2.dilate((lbl == i).astype(np.uint8), k) > 0) & raw).astype(np.uint8)
+        rim = (cv2.dilate(grown, np.ones((3, 3), np.uint8)) - grown) > 0
+        if rim.any() and seg["edge"][rim].mean() >= CARD_EDGE_SHARP:
+            keep |= grown > 0
+    if not keep.any():
+        return None
+    ys, xs = np.where(keep)
+    bys, bxs = np.where(blob)
+    kept_area = (xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1)
+    blob_area = (bxs.max() - bxs.min() + 1) * (bys.max() - bys.min() + 1)
+    # Sanity: a sheen is an appendage, so cutting it off leaves most of the blob
+    # standing. Losing most of it instead means the edge test rejected real cards
+    # (one photo kept a single 0.5% piece and its crop collapsed), so distrust
+    # the whole answer rather than crop to a fragment.
+    if kept_area < SHEEN_KEEP_MIN * blob_area:
+        return None
+    return int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
 
 
 def _card_quad(labels: np.ndarray, idx: int, sc: float):
@@ -390,7 +457,20 @@ def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
         return []
     dets = []
     for idx in seg["big"]:
-        d = _blob_detection(seg["labels"], idx, seg["sc"])
+        # Cut any bridged-on desk sheen off the blob before measuring it, so the
+        # crop drawn from these quads frames the prints and not the desk beside
+        # them. The blob itself stands when no sheen can be told apart.
+        box = _sheen_free_bbox(seg, idx)
+        blob = (seg["labels"] == idx)
+        if box is not None:
+            x0, x1, y0, y1 = box
+            trimmed = np.zeros_like(blob)
+            trimmed[y0:y1 + 1, x0:x1 + 1] = blob[y0:y1 + 1, x0:x1 + 1]
+            d = _blob_detection(trimmed.astype(np.int32), 1, seg["sc"]) if trimmed.any() else None
+        else:
+            d = None
+        if d is None:
+            d = _blob_detection(seg["labels"], idx, seg["sc"])
         if d is None:
             continue
         d.window_tilts = _window_tilts(seg["labels"], idx)

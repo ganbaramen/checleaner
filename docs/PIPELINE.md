@@ -111,17 +111,41 @@ card really can be small in frame. Together they can: a real card is always
 rectangular, and a real pile is never small. A blob is kept if it is either
 ≥ 25% of the largest blob's area **or** `fill ≥ PRINT_FILL`.
 
-**Glare merged *into* the print blob is the case none of this catches.** When the
-segmentation close bridges a print to an adjacent sheen, the two become one blob
-and no per-blob filter applies. Measured on the photos where it happens, the
-sheen is as bright as paper (a threshold sweep to `L > 0.85 × p99` barely moved
-the bounding box) and, on a smooth desk, as smooth as paper — so neither
-brightness nor a local-variance test separates them. Anchoring the crop on photo
-windows instead does fix those files, but it breaks worse ones: on a twelve-print
-pile only 2 windows were detected (bright print content merges its window into
-the border), collapsing the crop to a fraction of the pile. Left unfixed rather
-than shipped: it costs some desk margin on one side of an aligned crop, where the
-window-anchored version would have silently cut prints off.
+**Glare merged *into* the print blob** is the hardest case: when the
+segmentation close bridges a print to an adjacent desk sheen the two become one
+blob, so no per-blob filter applies, and every crop drawn from that blob swells
+to cover desk. `_sheen_free_bbox()` handles it, and what works is **how each
+piece of paper ends**, not what it looks like inside: a card has a crisp edge
+against the desk, a sheen fades into it. Splitting the unclosed paper into
+pieces and scoring each piece's own boundary by mean Scharr magnitude puts sheen
+at 235–350 against a card's 594–1511, so `CARD_EDGE_SHARP` (450) sits in open
+space between them.
+
+Three details are load-bearing:
+
+- **Erode to split, then measure grown back.** Pieces often merely touch, and a
+  few pixels parts them — but the boundary of an *eroded* piece sits in flat
+  paper and scores low whatever it is, so each piece is dilated back to its true
+  extent before its edge is judged.
+- **Only a bounding box comes out of it.** The rectangle is still fitted to the
+  *closed* blob trimmed to that box. Re-fitting it to the raw paper instead
+  moves the quad even when nothing is removed, because that mask is fragmented —
+  which showed up as two files shifting on a ~0% trim.
+- **Distrust a big loss.** A sheen is an appendage, so cutting it leaves most of
+  the blob standing; if less than `SHEEN_KEEP_MIN` of the bounding box survives,
+  the edge test has rejected real cards and the whole answer is discarded (one
+  photo kept a single 0.5% piece and its crop collapsed).
+
+Six *interior* statistics were measured first and every one of them overlaps —
+**don't reach for these again**: brightness (sheen is as bright as paper;
+sweeping to `L > 0.85 × p99` barely moved the box), local variance (on a smooth
+desk a sheen is as smooth as a border), edge-coverage trim (catches a
+7 %-coverage fringe but these run 41–64 %), and three ways of anchoring on photo
+windows — enclosed windows (fixes 2 files, trims 20–47 % off 4 others), any dark
+region (no fixes, no regressions), photo-shaped dark regions (still trims 305 px
+and 325 px off good files). They all fail for the same reason: windows are found
+for only some cards, so "paper not near a window" is not "not a card". The
+boundary is the one signal that doesn't depend on finding every window.
 
 **Corners, not a bounding rectangle.** A card photographed at an angle is a
 trapezoid, and `minAreaRect` can only circumscribe it — so it reads too wide
