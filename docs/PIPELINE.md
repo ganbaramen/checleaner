@@ -335,7 +335,15 @@ Where it looks matters in both directions, and both failure modes are real.
 Searching the whole rotated frame pulls in distant bright patches, over-growing
 the crop until it no longer fits and alignment declines outright; searching only
 inside the blob can't recover a border the segmentation clipped, so a card row
-stays cut off. It searches the blob's bbox plus a `PAPER_HALO` (20%) margin.
+stays cut off. It searches the blob's bbox plus a `PAPER_HALO` (20%) margin, and
+keeps only paper components that reach into the blob's own footprint.
+
+It then **trims a thin fringe** off each edge: an edge row or column carrying
+less than `PAPER_EDGE_COV` (25%) of the peak coverage is a bridged-on sheen, not
+prints. On one photo the bottom 66 px carried 7% coverage against the prints'
+100%, and stretching the crop to cover it made the whole frame uncroppable; on
+every known-good file the trim moves the box by at most 3 px. The threshold has
+to stay low — at 35% it starts eating real prints on a staggered pile.
 Together these dropped the worst top-vs-bottom margin gap across `chekis/main/`
 from 69 px to 6, and stopped a nine-print pile losing its top row.
 
@@ -361,11 +369,21 @@ which is also why the content turn (below) is folded *into* the alignment
 warp rather than applied after: turning a finished 16:9 crop would flip it
 into exactly that excluded shape.
 
-**Bail out, don't force it.** If even the fallback crop would reach past the
-real photo into the blank corners the rotation opened up, `align_multi()`
-returns `None` and the photo is left whole — today's existing behaviour. Checked by
-mapping the crop's corners back through the inverse rotation and testing
-they still land inside the original frame. This matters: these photos are
+**Nudge before bailing out.** The crop must stay inside the photo's real
+(unrotated) footprint, checked by mapping its corners back through the inverse
+rotation. But a crop whose *size* fits can still sit a few pixels over one edge —
+one real photo missed by 14 px of 4080, another by 1 px — and declining there
+throws away a good crop over an offset, so `place()` shifts it back inside
+instead. The shift is capped at `CROP_NUDGE` (2% of the crop's half-size), which
+matters more than it sounds: uncapped, a crop far wider than the pile "fits" once
+slid hard against one edge, which both lets a badly-shaped aspect win the
+selection and dumps all the desk on one side (one photo came out 298 px lopsided).
+Capping it dropped declines across `chekis/main/` from 13 to 6 while leaving every
+already-good crop within a few pixels of centred.
+
+**Bail out if even that can't place it.** If no candidate and not the fallback
+ratio can be placed inside the footprint, `align_multi()` returns `None` and the
+photo is left whole — today's existing behaviour. This matters: these photos are
 occasionally shot with prints laid out diagonally with barely any desk
 margin (see `docs/HISTORY.md`), where a centred crop simply isn't possible
 without padding that isn't there.

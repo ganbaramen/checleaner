@@ -647,9 +647,25 @@ either >= 25% of the largest blob's area *or* card-shaped works: a real card is
 always rectangular and a real pile is never small. 115252553 now aligns 3:4 with
 even margins.
 
-**155935560 really does run off the frame** -- its bottom-left prints are cut by
-the left edge and the bottom row reaches the bottom edge -- so declining is
-correct there, and the earlier claim was only accidentally right.
+**155935560 does not run off the frame either -- I misread it twice.** Measured
+against a bounding box the user drew round the prints, the blob overshoots left
+by 30 px and *bottom by 66 px* while undershooting right by 32 px: the prints are
+fully contained, and the overshoot is a bridged-on sheen. The bottom 66 px of
+blob carried 7% coverage against the prints' 100%, so `_paper_bbox` now trims
+edge rows/columns below `PAPER_EDGE_COV` (25% of peak) -- which fixes this file
+and 118 px of 145119616's glare while moving every known-good file's box by at
+most 3 px. The threshold can't go higher: at 35% it starts eating real prints on
+a staggered pile.
+
+That left it failing by 14 px of 4080 -- the crop's *size* fitted, it just sat
+slightly over one edge, because the prints really do span 96% of the frame width
+horizontally. `place()` now nudges such a crop back inside instead of declining.
+The nudge needs its cap (`CROP_NUDGE`, 2% of half-size): uncapped, a crop far
+wider than the pile "fits" once slid hard against one edge, which let a
+badly-shaped aspect win the selection and dumped all the desk on one side (one
+photo came out 298 px lopsided, and 012024586 went from a symmetric 4:3 to a
+16:9 with 298 px on one side). Capped, declines across the library fell from 13
+to 6 and every previously-good crop stayed within ~8 px of centred.
 
 **184109322 turned the wrong way because the face model was reading the balanced
 frame.** `content_rotation()` was being handed the colour-corrected image;

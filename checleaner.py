@@ -482,6 +482,12 @@ CROP_MARGIN = 0.04
 # How far past the detection blob to look for the prints' true paper extent,
 # as a fraction of the blob's own size. See _paper_bbox.
 PAPER_HALO = 0.20
+# An edge row/column of the paper mask carrying less than this fraction of the
+# peak coverage is a sheen fringe, not prints, and gets trimmed. See _paper_bbox.
+PAPER_EDGE_COV = 0.25
+# How far an aligned crop may be nudged off the prints' centre to bring it
+# inside the frame, as a fraction of its own half-size. See align_multi's place.
+CROP_NUDGE = 0.02
 
 
 def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
@@ -531,7 +537,7 @@ def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
     n, lbl, st, _ = cv2.connectedComponentsWithStats(pm, 8)
     bx0, by0 = (x0 - ix0) * scale, (y0 - iy0) * scale
     bx1, by1 = (x1 - ix0) * scale, (y1 - iy0) * scale
-    keep = []
+    kept = np.zeros_like(pm)
     for i in range(1, n):
         cx0, cy0 = st[i, cv2.CC_STAT_LEFT], st[i, cv2.CC_STAT_TOP]
         cx1 = cx0 + st[i, cv2.CC_STAT_WIDTH]
@@ -539,13 +545,39 @@ def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
         if st[i, cv2.CC_STAT_AREA] < 50:
             continue
         if cx1 > bx0 and cx0 < bx1 and cy1 > by0 and cy0 < by1:
-            keep.append((cx0, cy0, cx1, cy1))
-    if not keep:
+            kept[lbl == i] = 1
+    ys, xs = np.where(kept)
+    if len(ys) == 0:
         return None
-    px0 = ix0 + min(k[0] for k in keep) / scale
-    py0 = iy0 + min(k[1] for k in keep) / scale
-    px1 = ix0 + max(k[2] for k in keep) / scale
-    py1 = iy0 + max(k[3] for k in keep) / scale
+    kx0, kx1, ky0, ky1 = xs.min(), xs.max(), ys.min(), ys.max()
+
+    # Trim a thin fringe off each edge. A sheen the segmentation bridged onto the
+    # pile is often a sliver hugging one side -- on one photo the bottom 66 px
+    # carried 7% coverage against the prints' 100%, and dragging the crop down to
+    # cover it was enough to make the whole frame uncroppable. Prints are solid,
+    # so an edge band this empty is never one: trimming stops at the first row or
+    # column with real coverage, and on every known-good file it moves the box by
+    # at most 3 px.
+    sub = kept[ky0:ky1 + 1, kx0:kx1 + 1]
+
+    def solid(cov):
+        peak = cov.max()
+        if peak <= 0:
+            return 0, len(cov) - 1
+        lo = 0
+        while lo < len(cov) - 1 and cov[lo] < PAPER_EDGE_COV * peak:
+            lo += 1
+        hi = len(cov) - 1
+        while hi > lo and cov[hi] < PAPER_EDGE_COV * peak:
+            hi -= 1
+        return lo, hi
+
+    cl, cr = solid(sub.sum(axis=0))
+    rt, rb = solid(sub.sum(axis=1))
+    px0 = ix0 + (kx0 + cl) / scale
+    px1 = ix0 + (kx0 + cr) / scale
+    py0 = iy0 + (ky0 + rt) / scale
+    py1 = iy0 + (ky0 + rb) / scale
     pw, ph, bw, bh = px1 - px0, py1 - py0, x1 - x0, y1 - y0
     if not (0.5 * bw <= pw <= 1.3 * bw and 0.5 * bh <= ph <= 1.3 * bh):
         return None
@@ -610,24 +642,51 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
     # it reach past an edge into the blank fill the rotation opened up?
     invM = cv2.invertAffineTransform(M)
 
-    def fits(hw, hh):
-        corners = np.array([[cx - hw, cy - hh], [cx + hw, cy - hh],
-                            [cx + hw, cy + hh], [cx - hw, cy + hh]], np.float32)
-        back = cv2.transform(corners.reshape(-1, 1, 2), invM).reshape(-1, 2)
-        # A hair of slack: a pile that fills the frame can miss by a pixel or
-        # two and there is nothing to gain from declining over that -- the
-        # integer crop is clamped to the canvas anyway, so an overshoot this
-        # small cannot show a meaningful wedge of the blank the rotation opened.
-        pad = 0.002 * max(w, h)
-        return ((back[:, 0] >= -pad).all() and (back[:, 0] <= w + pad).all()
-                and (back[:, 1] >= -pad).all() and (back[:, 1] <= h + pad).all())
+    # Place a crop of this size so it stays inside the photo's real (unrotated)
+    # footprint rather than reaching into the blank the rotation opened up.
+    # Returns the centre to use, or None if the size simply cannot fit.
+    #
+    # Nudging beats refusing: a pile that nearly fills the frame produces a crop
+    # whose *size* fits but which sits a few pixels over one edge (one real photo
+    # missed by 14 px of 4080, another by 1 px), and declining there throws away
+    # a good crop over an offset. Prints stay centred to within that nudge.
+    pad = 0.002 * max(w, h)
+
+    def place(hw, hh, iters=8):
+        px, py = cx, cy
+        # Cap the nudge. Uncapped, a crop far wider than the pile "fits" once
+        # slid hard against one edge, which both lets a badly-shaped aspect win
+        # the selection and dumps all the desk on one side (one photo came out
+        # 298 px lopsided). A near-miss rescue needs a fraction of a percent.
+        max_nudge = CROP_NUDGE * max(hw, hh)
+        R = M[:, :2]                                   # original -> rotated, rotation only
+        for _ in range(iters):
+            if (px - cx) ** 2 + (py - cy) ** 2 > max_nudge ** 2:
+                return None
+            corners = np.array([[px - hw, py - hh], [px + hw, py - hh],
+                                [px + hw, py + hh], [px - hw, py + hh]], np.float32)
+            b = cv2.transform(corners.reshape(-1, 1, 2), invM).reshape(-1, 2)
+            lo_x, hi_x = b[:, 0].min(), b[:, 0].max()
+            lo_y, hi_y = b[:, 1].min(), b[:, 1].max()
+            if lo_x < -pad and hi_x > w + pad:
+                return None                            # too wide to fit at all
+            if lo_y < -pad and hi_y > h + pad:
+                return None                            # too tall to fit at all
+            dx = (-lo_x if lo_x < 0 else 0.0) - (hi_x - w if hi_x > w else 0.0)
+            dy = (-lo_y if lo_y < 0 else 0.0) - (hi_y - h if hi_y > h else 0.0)
+            if abs(dx) <= 0.5 and abs(dy) <= 0.5:
+                return px, py
+            shift = R @ np.array([dx, dy], np.float64)
+            px += float(shift[0])
+            py += float(shift[1])
+        return None
 
     best = None
     for label, r in CROP_ASPECTS:
         hh = max(bh2, bw2 / r)
         hw = hh * r
         score = abs((hw - bw2) - (hh - bh2))       # excess margin: 0 on the pinned axis
-        if fits(hw, hh) and (best is None or score < best[0]):
+        if place(hw, hh) is not None and (best is None or score < best[0]):
             best = (score, label, hw, hh)
     if best is not None:
         _, crop_label, hw, hh = best
@@ -637,7 +696,7 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         # a frame-filling pile pick a worse-fitting aspect just because the
         # better one no longer fit with margin added.
         grown_w, grown_h = hw * (1 + CROP_MARGIN), hh * (1 + CROP_MARGIN)
-        if fits(grown_w, grown_h):
+        if place(grown_w, grown_h) is not None:
             hw, hh = grown_w, grown_h
     else:
         # the frame's own shape (as turned) -- exactly the pre-CROP_ASPECTS
@@ -646,10 +705,11 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         ratio = (w / h) if turn % 2 == 0 else (h / w)
         hh = max(bh2, bw2 / ratio)
         hw = hh * ratio
-        if not fits(hw, hh):
+        if place(hw, hh) is None:
             return None
         crop_label = "original"
 
+    cx, cy = place(hw, hh)
     x0i, y0i = max(0, int(round(cx - hw))), max(0, int(round(cy - hh)))
     x1i, y1i = min(new_w, int(round(cx + hw))), min(new_h, int(round(cy + hh)))
     crop = rotated[y0i:y1i, x0i:x1i]
