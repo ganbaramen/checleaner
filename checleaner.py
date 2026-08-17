@@ -662,6 +662,10 @@ CROP_MARGIN = 0.04
 # How far past the detection blob to look for the prints' true paper extent,
 # as a fraction of the blob's own size. See _paper_bbox.
 PAPER_HALO = 0.20
+# Least a crop's smaller margin may be as a fraction of its larger one, on the
+# same axis, before the crop counts as lopsided and the photo is left whole.
+# See align_multi's lopsided().
+CROP_BALANCE = 0.25
 
 
 def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
@@ -845,13 +849,26 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
             py += float(shift[1])
         return None
 
+    def lopsided(hw, hh, px, py):
+        """True if a crop leaves one side of the prints flush against the edge
+        while the opposite side carries real desk. That reads worse than not
+        cropping at all -- even margins, or none anywhere, both look deliberate;
+        one bare edge facing a wide one looks like a mistake."""
+        pairs = (((cx - bw2) - (px - hw), (px + hw) - (cx + bw2)),
+                 ((cy - bh2) - (py - hh), (py + hh) - (cy + bh2)))
+        for a, b in pairs:
+            lo, hi = min(a, b), max(a, b)
+            if hi > 0.04 * max(hw, hh) and lo < CROP_BALANCE * hi:
+                return True
+        return False
+
     def choose(shrink):
         found = None
         for label, r in CROP_ASPECTS:
             hh = max(bh2 * shrink, bw2 * shrink / r)
             hw = hh * r
             at = place(hw, hh)
-            if at is None:
+            if at is None or lopsided(hw, hh, *at):
                 continue
             # excess margin (0 on the pinned axis), plus however far the crop had
             # to slide to fit -- so a shape that sits centred beats one that only
@@ -878,7 +895,8 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         # a frame-filling pile pick a worse-fitting aspect just because the
         # better one no longer fit with margin added.
         grown_w, grown_h = hw * (1 + CROP_MARGIN), hh * (1 + CROP_MARGIN)
-        if place(grown_w, grown_h) is not None:
+        grown_at = place(grown_w, grown_h)
+        if grown_at is not None and not lopsided(grown_w, grown_h, *grown_at):
             hw, hh = grown_w, grown_h
     else:
         # the frame's own shape (as turned) -- exactly the pre-CROP_ASPECTS
@@ -887,7 +905,8 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         ratio = (w / h) if turn % 2 == 0 else (h / w)
         hh = max(bh2, bw2 / ratio)
         hw = hh * ratio
-        if place(hw, hh) is None:
+        at = place(hw, hh)
+        if at is None or lopsided(hw, hh, *at):
             return None
         crop_label = "original"
 

@@ -850,6 +850,27 @@ answer. 155935560 now carries an uneven bottom margin instead of a missing row,
 which is the honest trade: its pile is 1.67:1 and neither 4:3 nor 16:9 fits it
 well.
 
+## A lopsided crop is worse than no crop (2026-08-17)
+
+Reported directly, and it settles a question that had been driving several
+rounds of tuning: "if one side seems to get zero margin then it's better to not
+crop, since leaving space on one side with no space on the other looks worse
+than having some space on both sides."
+
+`align_multi` now rejects any candidate whose smaller margin is under
+`CROP_BALANCE` (25%) of its larger one on either axis, and leaves the photo
+whole if nothing balanced can be placed. Symmetric zero margins stay fine --
+tight all round looks deliberate, and most cropping files sit at exactly 0/0 on
+one axis. It is one bare edge *facing* a wide one that is barred.
+
+Calibrating it against the library first mattered: a threshold of 0.15 left
+155935560 in at 87 px against 503 (ratio 0.17), which is exactly the look being
+complained about, while 0.25 catches it and still passes every well-balanced
+file (the closest keeper, 012024586, sits at 0.33). Four photos now stay whole
+for this reason -- 154257343 and 055435791 as reported, plus 155935560 and
+073449276 -- taking declines from 5 to 8 and the worst margin asymmetry from
+464 px to 140.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

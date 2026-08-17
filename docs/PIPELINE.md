@@ -440,6 +440,14 @@ with a whole row cut off. Candidates are also scored on how far they had to
 slide, so a shape that sits centred beats one that only works jammed against an
 edge.
 
+**Refuse a lopsided crop.** A crop that leaves one side of the prints flush
+against the edge while the opposite side carries real desk reads worse than not
+cropping at all: even margins look deliberate, none anywhere looks deliberate,
+one bare edge facing a wide one looks like a mistake. So a candidate whose
+smaller margin is under `CROP_BALANCE` (25%) of its larger one, on either axis,
+is rejected — and if nothing balanced can be placed, the photo is left whole.
+Symmetric zero margins are fine and common; it is the *pairing* that is barred.
+
 **Do not shrink to fit.** A fallback that retried the target a few percent
 smaller looks tempting for a frame-filling pile, on the theory that it eats the
 leftover sheen. It eats prints: the crop must *contain* them, so shrinking below
