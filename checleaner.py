@@ -222,6 +222,7 @@ def apply(rgb8: np.ndarray, gain, off, gamma, white_t, black_t) -> np.ndarray:
 @dataclass
 class Detection:
     quad: np.ndarray | None = None   # 4x2 in full-res coords, long edge first
+    hull: np.ndarray | None = None   # the blob's outline, full-res -- see _blob_detection
     aspect: float = 0.0              # of `quad`: the corner fit when there is one
     rect_aspect: float = 0.0         # always the blob's minAreaRect -- see detect_print
     fill: float = 0.0                # how rectangular the detected blob is
@@ -296,19 +297,41 @@ def _sheen_free_bbox(seg, idx: int):
     # and scores low no matter what it is.
     n, lbl, stats, _ = cv2.connectedComponentsWithStats(cv2.erode(raw.astype(np.uint8), k), 8)
     area_min = SHEEN_MIN_AREA * blob.size
-    keep = np.zeros(blob.shape, bool)
+    # Subtract what is *proven* to be sheen rather than keeping what is proven to
+    # be card. Building it the other way round silently discarded every piece too
+    # small to judge -- including the thin wedge a tilted card makes at a corner,
+    # which shrank the box into a real print.
+    sheen = np.zeros(blob.shape, bool)
+    card = np.zeros(blob.shape, bool)
     for i in range(1, n):
         if stats[i, cv2.CC_STAT_AREA] < area_min:
             continue
         grown = ((cv2.dilate((lbl == i).astype(np.uint8), k) > 0) & raw).astype(np.uint8)
         rim = (cv2.dilate(grown, np.ones((3, 3), np.uint8)) - grown) > 0
-        if rim.any() and seg["edge"][rim].mean() >= CARD_EDGE_SHARP:
-            keep |= grown > 0
-    if not keep.any():
-        return None
-    ys, xs = np.where(keep)
+        if not rim.any():
+            continue
+        (card if seg["edge"][rim].mean() >= CARD_EDGE_SHARP else sheen)[grown > 0] = True
+    if not sheen.any() or not card.any():
+        return None                                   # nothing to cut: blob stands
+
+    # Pull a side of the blob in only where the sheen actually sticks out past
+    # the cards. Erasing the sheen's own pixels is not enough -- the close also
+    # filled the dark gap it was bridged across, and that fill holds the box out
+    # at full width by itself -- and trimming to the card pieces outright would
+    # cut the thin wedge a tilted card makes at a corner.
+    cys, cxs = np.where(card)
+    sys_, sxs = np.where(sheen)
     bys, bxs = np.where(blob)
-    kept_area = (xs.max() - xs.min() + 1) * (ys.max() - ys.min() + 1)
+    x0 = int(cxs.min()) if sxs.min() < cxs.min() else int(bxs.min())
+    x1 = int(cxs.max()) if sxs.max() > cxs.max() else int(bxs.max())
+    y0 = int(cys.min()) if sys_.min() < cys.min() else int(bys.min())
+    y1 = int(cys.max()) if sys_.max() > cys.max() else int(bys.max())
+    if (x0, x1, y0, y1) == (int(bxs.min()), int(bxs.max()), int(bys.min()), int(bys.max())):
+        return None                                   # sheen sits inside the cards
+
+    xs = np.array([x0, x1])
+    ys = np.array([y0, y1])
+    kept_area = (x1 - x0 + 1) * (y1 - y0 + 1)
     blob_area = (bxs.max() - bxs.min() + 1) * (bys.max() - bys.min() + 1)
     # Sanity: a sheen is an appendage, so cutting it off leaves most of the blob
     # standing. Losing most of it instead means the edge test rejected real cards
@@ -385,6 +408,12 @@ def _blob_detection(labels: np.ndarray, idx: int, sc: float) -> Detection | None
 
     return Detection(
         quad=box / sc,
+        # The blob's own outline, for callers that need its true extent. Its
+        # minAreaRect is a *rotated* rectangle, so on a tilted pile the corners
+        # bound far more than the prints -- one 3583x2698 frame produced a corner
+        # bbox of x[-17,3512] y[-475,3179], and the crop built on it cut a print
+        # in half. The hull never leaves the prints.
+        hull=hull.reshape(-1, 2).astype(np.float32) / sc,
         aspect=(edges[0] + edges[2]) / (edges[1] + edges[3]),
         # fill measured on the hull, so a frame with an unfilled middle still scores ~1
         fill=cv2.contourArea(hull) / (rw * rh),
@@ -633,9 +662,6 @@ CROP_MARGIN = 0.04
 # How far past the detection blob to look for the prints' true paper extent,
 # as a fraction of the blob's own size. See _paper_bbox.
 PAPER_HALO = 0.20
-# An edge row/column of the paper mask carrying less than this fraction of the
-# peak coverage is a sheen fringe, not prints, and gets trimmed. See _paper_bbox.
-PAPER_EDGE_COV = 0.25
 # How far an aligned crop may be nudged off the prints' centre to bring it
 # inside the frame, as a fraction of its own half-size. See align_multi's place.
 CROP_NUDGE = 0.02
@@ -702,33 +728,17 @@ def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
         return None
     kx0, kx1, ky0, ky1 = xs.min(), xs.max(), ys.min(), ys.max()
 
-    # Trim a thin fringe off each edge. A sheen the segmentation bridged onto the
-    # pile is often a sliver hugging one side -- on one photo the bottom 66 px
-    # carried 7% coverage against the prints' 100%, and dragging the crop down to
-    # cover it was enough to make the whole frame uncroppable. Prints are solid,
-    # so an edge band this empty is never one: trimming stops at the first row or
-    # column with real coverage, and on every known-good file it moves the box by
-    # at most 3 px.
-    sub = kept[ky0:ky1 + 1, kx0:kx1 + 1]
-
-    def solid(cov):
-        peak = cov.max()
-        if peak <= 0:
-            return 0, len(cov) - 1
-        lo = 0
-        while lo < len(cov) - 1 and cov[lo] < PAPER_EDGE_COV * peak:
-            lo += 1
-        hi = len(cov) - 1
-        while hi > lo and cov[hi] < PAPER_EDGE_COV * peak:
-            hi -= 1
-        return lo, hi
-
-    cl, cr = solid(sub.sum(axis=0))
-    rt, rb = solid(sub.sum(axis=1))
-    px0 = ix0 + (kx0 + cl) / scale
-    px1 = ix0 + (kx0 + cr) / scale
-    py0 = iy0 + (ky0 + rt) / scale
-    py1 = iy0 + (ky0 + rb) / scale
+    # No edge-coverage trim here. One used to live at this point, to shave a
+    # sheen fringe hugging one side, but it cannot tell that fringe from the
+    # leading corner of a *tilted* card, whose coverage ramps up just as gently
+    # (1% rising to 5% over 164 columns on one photo) -- and it cut 656 px off a
+    # real print doing so. Sheen is now removed from the blob itself, by how
+    # crisply each piece of paper ends (`_sheen_free_bbox`), which a tilted
+    # corner passes because its edge is sharp whatever its coverage.
+    px0 = ix0 + kx0 / scale
+    px1 = ix0 + kx1 / scale
+    py0 = iy0 + ky0 / scale
+    py1 = iy0 + ky1 / scale
     pw, ph, bw, bh = px1 - px0, py1 - py0, x1 - x0, y1 - y0
     if not (0.5 * bw <= pw <= 1.3 * bw and 0.5 * bh <= ph <= 1.3 * bh):
         return None
@@ -773,8 +783,10 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
     M[1, 2] += new_h / 2 - center[1]
     rotated = cv2.warpAffine(img, M, (new_w, new_h), flags=cv2.INTER_LANCZOS4)
 
-    pts = np.concatenate([d.quad for d in dets]).reshape(-1, 1, 2).astype(np.float32)
-    pts = cv2.transform(pts, M).reshape(-1, 2)
+    # Outline, not rectangle corners: a blob's minAreaRect is rotated, so once
+    # the frame is turned its corners bound far more than the prints do.
+    pts = np.concatenate([d.hull if d.hull is not None else d.quad for d in dets])
+    pts = cv2.transform(pts.reshape(-1, 1, 2).astype(np.float32), M).reshape(-1, 2)
     x0, y0 = pts.min(axis=0)
     x1, y1 = pts.max(axis=0)
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -832,13 +844,25 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
             py += float(shift[1])
         return None
 
-    best = None
-    for label, r in CROP_ASPECTS:
-        hh = max(bh2, bw2 / r)
-        hw = hh * r
-        score = abs((hw - bw2) - (hh - bh2))       # excess margin: 0 on the pinned axis
-        if place(hw, hh) is not None and (best is None or score < best[0]):
-            best = (score, label, hw, hh)
+    def choose(shrink):
+        found = None
+        for label, r in CROP_ASPECTS:
+            hh = max(bh2 * shrink, bw2 * shrink / r)
+            hw = hh * r
+            score = abs((hw - bw2) - (hh - bh2))   # excess margin: 0 on the pinned axis
+            if place(hw, hh) is not None and (found is None or score < found[0]):
+                found = (score, label, hw, hh)
+        return found
+
+    # A frame-filling pile can miss every shape by a little, and leaving it
+    # uncropped is the worst outcome available. Let the target shrink by a few
+    # percent as a last resort -- what that eats is the leftover sheen the blob
+    # still carries, since the prints themselves are what set the box.
+    best = choose(1.0)
+    for s in (0.97, 0.94):
+        if best is not None:
+            break
+        best = choose(s)
     if best is not None:
         _, crop_label, hw, hh = best
         # A little breathing room so prints aren't jammed against the crop edge
@@ -1334,15 +1358,23 @@ def run(args) -> int:
                     r.kind = "single?"
                     r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "
                                    f"solidity {det.solidity:.3f})")
-                else:
-                    aligned = align_multi(img, detect_all_prints(path), turn=turn)
-                    if aligned is not None:
-                        img, align_stats = aligned
+                # Level and crop a near-miss too, rather than leaving it whole.
+                # Nothing here can tell a badly-fitted single card from several
+                # prints overlapped into a card-shaped pile -- windows, fill and
+                # solidity all overlap between the two -- and every near-miss in
+                # this library turned out to be the latter. Cropping costs
+                # little if the guess is wrong (a levelled frame around one card,
+                # not a mangled one) and the flag still sends it to review, so
+                # the human look this band exists for is unchanged.
+                aligned = align_multi(img, detect_all_prints(path), turn=turn)
+                if aligned is not None:
+                    img, align_stats = aligned
+                    if not near_miss:
                         r.kind = "aligned"
-                        r.stats.update(align_stats)
-                        if turn:
-                            r.stats["reorient"] = turn * 90
-                        turn = 0            # already folded into the warp
+                    r.stats.update(align_stats)
+                    if turn:
+                        r.stats["reorient"] = turn * 90
+                    turn = 0                # already folded into the warp
                 if turn:                    # single? / align declined: turn whole
                     img = np.ascontiguousarray(np.rot90(img, turn))
                     r.stats["reorient"] = turn * 90

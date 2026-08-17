@@ -775,6 +775,48 @@ Verified across the library: declines stay at 3 (the same three as before, all
 frame-filling), no previously-good crop moved, and the twelve spot-checked
 aligned files are unchanged. 18 tests pass.
 
+## A cut print, two lopsided crops, and six uncropped piles (2026-08-17)
+
+Four separate causes behind the next round of reports.
+
+**A print was being cut in half (073507152).** Two faults compounded. The crop
+extent was read off each blob's `minAreaRect` *corners*, but that rectangle is
+itself rotated, so on a tilted pile its corner box bounds far more than the
+prints -- here x[-17,3512] y[-475,3179] on a 3583x2698 frame. Detections now
+carry the blob's `hull`, and the extent is measured from that. Then
+`_paper_bbox`'s edge-coverage trim removed a further 656 px, because a tilted
+card's leading corner ramps up as gently as a sheen fringe (1% rising to 5% over
+164 columns) and the trim could not tell them apart. That trim is gone: sheen is
+removed from the blob itself by boundary sharpness, which a tilted corner passes
+however thin it is.
+
+**Sheen trimming was cutting the wrong thing.** `_sheen_free_bbox` was keeping
+what it could prove was card, which silently discarded every piece too small to
+judge -- including that same tilted-corner wedge. It now subtracts what it can
+prove is *sheen*, and pulls a side in only where the sheen sticks out past the
+cards. Erasing the sheen's own pixels is not enough on its own, because the
+close also filled the dark gap it was bridged across and that fill holds the box
+out at full width by itself.
+
+**A frame-filling pile declined rather than cropping (155935560).** Its best
+shape missed by 136 px, so the target is now retried at 97% and 94%. What that
+eats is leftover sheen. It stops at 94% on purpose: at 90% two other files
+started cutting real prints, which is worse than not cropping.
+
+**Six multi-print photos sat in review uncropped** (165923174, 142631910,
+153435918, 154241942, 011948001, 012314592). All six are plainly several prints;
+all six landed in the near-miss band, which left them whole. Nothing available
+separates a badly-fitted single card from prints overlapped into a card-shaped
+pile -- window counts overlap completely (these six: 0-9 raw windows, genuine
+singles: 0-5), as do fill and solidity. So the *policy* changed rather than the
+classifier: a near-miss is now levelled and cropped like any other multi-print
+photo and keeps its flag. If the guess is ever wrong the result is a levelled
+frame around one card rather than a mangled one, and review still gets it.
+
+Across the library: worst margin asymmetry fell from 253 px to 112, declines
+went 3 -> 4 (two frame-filling piles whose prints genuinely run off the frame),
+and 84 balanced / 22 review. 19 tests pass.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

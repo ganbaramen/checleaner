@@ -181,12 +181,23 @@ deliberately small — the overlapping 2-print blob it has to keep out measured
 enough to admit a card.
 
 If the fit fails and the aspect is *far* out of range, that is an ordinary
-multi-print photo — balance it and leave it whole, no flag. Only a near-miss
-(aspect 1.40–1.90, i.e. roughly card-shaped but failing the tight test) is worth a
-human look, because that is what a genuinely bad fit looks like. That band reads
-the **blob's `minAreaRect` aspect**, not the corner fit — it was calibrated
-against the former, and switching it pulled photos that were classifying
-correctly as multi-print into review for no gain.
+multi-print photo — balance it, no flag. A near-miss (aspect 1.40–1.90, i.e.
+roughly card-shaped but failing the tight test) is worth a human look, because
+that is what a genuinely bad fit looks like. That band reads the **blob's
+`minAreaRect` aspect**, not the corner fit — it was calibrated against the
+former, and switching it pulled photos that were classifying correctly as
+multi-print into review for no gain.
+
+A near-miss is still **levelled and cropped** like any other multi-print photo;
+only the flag differs. Nothing available can tell a badly-fitted single card
+from several prints overlapped into a card-shaped pile — window count, fill and
+solidity all overlap between the two (the six near-misses in this library
+measured 0–9 windows against genuine singles' 0–5) — and every near-miss here
+turned out to be the latter. Leaving them whole was the visible cost: the crop a
+multi-print photo deserves was withheld from all six. If the guess is wrong the
+result is a levelled frame around one card rather than a mangled one, and the
+flag still routes it to review, so the human look this band exists for is
+unchanged.
 
 **Overlapping prints** are the hard case, and a photo-window count is the
 backstop. Prints laid over each other merge into one blob whose shape stats can
@@ -371,12 +382,17 @@ inside the blob can't recover a border the segmentation clipped, so a card row
 stays cut off. It searches the blob's bbox plus a `PAPER_HALO` (20%) margin, and
 keeps only paper components that reach into the blob's own footprint.
 
-It then **trims a thin fringe** off each edge: an edge row or column carrying
-less than `PAPER_EDGE_COV` (25%) of the peak coverage is a bridged-on sheen, not
-prints. On one photo the bottom 66 px carried 7% coverage against the prints'
-100%, and stretching the crop to cover it made the whole frame uncroppable; on
-every known-good file the trim moves the box by at most 3 px. The threshold has
-to stay low — at 35% it starts eating real prints on a staggered pile.
+It does **not** trim by edge coverage. A trim like that used to live here, to
+shave a sheen fringe hugging one side, but it cannot tell that fringe from the
+leading corner of a *tilted* card, whose coverage ramps up just as gently — 1%
+rising to 5% over 164 columns on one photo, off which it cut 656 px of a real
+print. Sheen is removed from the blob itself instead (§ 3), by how crisply each
+piece of paper ends, which a tilted corner passes however thin it is.
+
+The extent it measures comes from each blob's **outline**, not its `minAreaRect`
+corners: that rectangle is itself rotated, so on a tilted pile its corners bound
+far more than the prints — one 3583 × 2698 frame produced a corner box of
+x[−17, 3512] y[−475, 3179], and the crop built on it cut a print in half.
 Together these dropped the worst top-vs-bottom margin gap across `chekis/main/`
 from 69 px to 6, and stopped a nine-print pile losing its top row.
 
@@ -413,6 +429,13 @@ slid hard against one edge, which both lets a badly-shaped aspect win the
 selection and dumps all the desk on one side (one photo came out 298 px lopsided).
 Capping it dropped declines across `chekis/main/` from 13 to 6 while leaving every
 already-good crop within a few pixels of centred.
+
+**Shrink a little before bailing out.** A frame-filling pile can miss every
+shape by a few percent, and leaving it uncropped is the worst outcome available,
+so the target is retried at 97% and 94% of its size. What that eats is the
+leftover sheen the blob still carries, since the prints are what set the box in
+the first place. It stops there deliberately: at 90% the crop starts cutting
+real prints, which is worse than not cropping at all.
 
 **Bail out if even that can't place it.** If no candidate and not the fallback
 ratio can be placed inside the footprint, `align_multi()` returns `None` and the
