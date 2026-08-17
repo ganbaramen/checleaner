@@ -1290,6 +1290,7 @@ async function withExif(blob, srcFile, outW, outH) {
 const $ = id => document.getElementById(id);
 const statusEl = $("status");
 let resultCanvas = null, resultName = "cheki.jpg", sourceFile = null;
+let lastDetection = null;      // read by tools/webdetect.py; see runFile()
 
 const setStatus = t => { statusEl.textContent = t; };
 const nextFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
@@ -1358,7 +1359,8 @@ async function process(file) {
   if (isSingle || nearMiss) {
     if (det.windows >= MULTI_WINDOWS) { isSingle = false; nearMiss = false; }
   }
-  let out, info = { aspect: det.aspect, fill: det.fill, blobs: det.blobs, windows: det.windows };
+  let out, info = { aspect: det.aspect, fill: det.fill, solidity: det.solidity,
+                    blobs: det.blobs, windows: det.windows };
 
   if (isSingle) {
     setStatus("straightening and cropping…");
@@ -1491,6 +1493,11 @@ async function runFile(file) {
     c.width = res.out.width; c.height = res.out.height;
     c.getContext("2d").putImageData(res.out, 0, 0);
     resultCanvas = c;
+    // The detection numbers the gates were decided on, kept reachable so
+    // tools/webdetect.py can calibrate the JS thresholds against a sweep --
+    // they are measured separately from Python's (canvas decoding differs), and
+    // there is no other way to read them off a finished page.
+    lastDetection = res.info;
     report(res);
     setStatus("done — " + res.out.width + " × " + res.out.height);
   } catch (err) {

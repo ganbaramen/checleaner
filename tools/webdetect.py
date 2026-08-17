@@ -61,10 +61,14 @@ READ = """() => ({
   // which is script-scoped and never lands on `window`)
   size: typeof resultCanvas !== 'undefined' && resultCanvas
         ? `${resultCanvas.width}x${resultCanvas.height}` : '-',
+  // the numbers the single/near-miss gates were decided on. Only the near-miss
+  // flag text mentions aspect, so without this a sweep can't calibrate the
+  // thresholds -- it can only see which side of them each file landed.
+  det: typeof lastDetection !== 'undefined' ? lastDetection : null,
 })"""
 
-FIELDS = ["file", "kind", "crop", "size", "white", "gain", "windows", "prints",
-          "tilt", "flags"]
+FIELDS = ["file", "kind", "crop", "size", "white", "gain", "aspect", "fill",
+          "solidity", "windows", "prints", "tilt", "flags"]
 
 
 def summarise(name: str, out: dict) -> dict:
@@ -75,6 +79,7 @@ def summarise(name: str, out: dict) -> dict:
     diff nobody reads.
     """
     stats = " ".join(out["stats"].split())
+    det = out.get("det") or {}
     status = out["status"].strip()
     flags = " ".join(out["flags"].split())
 
@@ -103,6 +108,9 @@ def summarise(name: str, out: dict) -> dict:
         # diffs as "nothing changed" -- every geometry field is untouched by it.
         "white": grab(r"white before([\d, ]+?)white after"),
         "gain": grab(r"gain([\d., ]+?)clipped"),
+        "aspect": f"{det['aspect']:.3f}" if det.get("aspect") is not None else "-",
+        "fill": f"{det['fill']:.3f}" if det.get("fill") is not None else "-",
+        "solidity": f"{det['solidity']:.3f}" if det.get("solidity") is not None else "-",
         "windows": grab(r"photo windows(\d+)"),
         "prints": grab(r"prints seen(\d+)"),
         "tilt": grab(r"levelled(-?[\d.]+)°"),

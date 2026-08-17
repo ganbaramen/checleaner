@@ -1003,6 +1003,28 @@ for the numbers. Every one buys this degree back by costing tens of degrees on
 staggered piles whose blob tilt is genuinely garbage (one falls back to −33°).
 Left as it is: the file is already flagged for review.
 
+### The phone app deliberately does not get this fix
+
+Checked, and the answer is no. The same shape of bug is there — one shared
+window threshold guarding both gates — and one of the two singles
+(`033323480`, 7 windows) plus one other (`073350228`, 6) are demoted by it. But
+the JS cannot afford the same split, because its solidity is an approximation
+(`closedArea / hullArea`, no `findContours`) that cannot see the notches in a
+staggered row. Of the four files passing the full JS single gate, the two
+singles and the two multis interleave on every metric — windows 6/7 against
+6/7, aspect 1.579/1.585 against 1.576/1.639 — so any raise that frees the
+singles also frees `20260221_153435918`, three unevenly-laid prints that Python
+rejects on shape (0.863/0.793) and the app reads as a clean card (0.995/0.998).
+
+Left at 6. Two singles come out levelled instead of cropped, whole and
+rotatable by hand; the alternative is a real row warped into one card. The
+proper fix is a true external-contour area in the JS, not a moved threshold.
+
+Getting to that answer needed numbers the page never showed: `runFile()` now
+keeps the detection on `lastDetection`, and `tools/webdetect.py` records
+`aspect`, `fill` and `solidity`. Without them a sweep can only see which side
+of a threshold each file fell, never how far.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

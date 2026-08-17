@@ -154,7 +154,10 @@ errors loudly. There is still no *assertion* harness — see Next steps.
   near-miss, because the first mistake refuses to crop a real print and the
   second only refiles it. Do not collapse them: of 45 blobs passing the single
   gate, 44 are real cards reaching 7 windows and the 1 genuine pile also sits at
-  7, so no shared threshold works. See `docs/PIPELINE.md` § 3.
+  7, so no shared threshold works. See `docs/PIPELINE.md` § 3. **This split is
+  Python-only** — `checleaner.html` keeps one threshold (6) because its
+  approximated solidity can't see a staggered row's notches, so the count is the
+  only thing stopping one being cropped as a card. Don't "finish the port".
 - **The detection thresholds are calibrated against the real library, not
   guessed** — `PRINT_FILL`, `CARD_OPP_MIN`/`CARD_AREA_MIN`/`CARD_SOLIDITY_MIN`,
   `MULTI_WINDOWS`, `CARD_WINDOWS`, `PAPER_HALO`, and `--aspect-hi` (1.64, with

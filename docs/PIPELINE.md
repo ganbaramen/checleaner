@@ -338,6 +338,32 @@ solidity to ~0.56 and demoting it to a flagged near-miss instead of an
 auto-crop — accepted as the safe failure direction (a flag costs a look;
 a wrongly-accepted grid costs a mangled photo), not chased further.
 
+**The two-threshold split above is Python-only, on purpose.** In Python a
+staggered row is thrown out by shape before the count is consulted, so raising
+the bar for confident fits costs nothing. In JS it isn't: the approximated
+solidity cannot see the notches in a staggered row. `20260221_153435918`, three
+prints laid unevenly, reads fill 0.863 / solidity 0.793 to Python and **0.995 /
+0.998** to the app — it sails through the JS shape gate, and the window count is
+the only thing between it and being warped into one card.
+
+Measured over `main/` + `rancheki/`, the four files that pass the full JS single
+gate interleave completely:
+
+| file | aspect | fill | solidity | windows | truth |
+|---|---|---|---|---|---|
+| `20260221_153435918` | 1.576 | 0.995 | 0.998 | 6 | **multi** |
+| `20260729_033323480` | 1.579 | 0.997 | 0.999 | 7 | single |
+| `20260401_073350228` | 1.585 | 0.996 | 0.991 | 6 | single |
+| `20260811_012024586` | 1.639 | 0.994 | 0.994 | 7 | **multi** |
+
+No threshold on any recorded metric separates those rows, and aspect can't
+help either (the multis bracket the singles). So `MULTI_WINDOWS` stays 6 for
+both JS gates. The price is that those two singles are levelled rather than
+cropped in the app — the photo is kept whole and the user can rotate it by
+hand, which is much cheaper than mangling a real row. Closing this properly
+means giving the JS a true external-contour area so its solidity sees the
+notches, not moving the count.
+
 Two of the 106 files in `chekis/main/` give the phone app no blob at all
 ("couldn't find a white border in this photo") where Python segments them
 fine: `PXL_20260128_053032673.MP.jpg` and `PXL_20260630_140740030.jpg`. Same
