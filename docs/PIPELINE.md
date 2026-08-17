@@ -303,14 +303,23 @@ into 3:4 (or the reverse), which is the user's own choice made with the image
 in front of them, not a misclassification.
 
 **Rotation.** `detect_all_prints()` runs the same paper-frame segmentation as
-single-print detection, but keeps every large blob instead of just the
-biggest, and reports each one's `minAreaRect` tilt. A rectangle looks the same
-every 90°, so tilt is folded into [-45°, 45°) before combining — two prints at
-+44° and −44° are 2° apart, not 88°, and averaging the raw angles would get
-that wrong. The frame is rotated by the **area-weighted circular mean** of
-these tilts (weighted so a couple of small false-positive blobs can't outvote
-the real prints), so as many prints as possible land parallel to the frame
-edges.
+single-print detection, but keeps every large blob instead of just the biggest.
+A rectangle looks the same every 90°, so tilt is folded into [-45°, 45°) before
+combining — two prints at +44° and −44° are 2° apart, not 88°, and averaging the
+raw angles would get that wrong. The frame is rotated by the **area-weighted
+circular mean** of the tilts, so as many prints as possible land parallel to the
+frame edges.
+
+Those tilts come from the **photo windows**, not the blob rectangles, whenever
+at least `MIN_TILT_WINDOWS` of them are rectangular enough to trust
+(`_window_tilts`). A window is a print's own picture area, so its rectangle is
+the *card's* rectangle. A merged blob's rectangle is not: on a staggered pile it
+describes the arrangement's outline, which is tilted even when every card in it
+is level — one photo's blob read −2.13° while all eight of its windows agreed on
+−0.27°, and the frame came out visibly askew. A sheen bridged onto the blob skews
+it further. Windows sit inside the cards, out of reach of both. The blob
+rectangles remain the fallback for piles whose windows are too few or too ragged
+(bright print content merges a window into the border).
 
 **Crop.** After rotating (with the canvas expanded so nothing is clipped),
 take the union bounding box of every detected blob in the rotated frame and

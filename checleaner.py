@@ -75,6 +75,12 @@ CARD_AREA_MIN = 0.97
 # the corner fit buys a small relaxation, but no more: the overlapping 2-print
 # blob this has to keep out measured 0.916.
 CARD_SOLIDITY_MIN = 0.95
+# How rectangular an enclosed photo window must be before its angle is trusted
+# as a card's angle. See _window_tilts.
+WINDOW_RECT_MIN = 0.75
+# How many trustworthy windows it takes before their angle is used for the
+# frame's tilt instead of the blob rectangles'. See _dominant_tilt.
+MIN_TILT_WINDOWS = 2
 
 
 # ---------------------------------------------------------------- colour space
@@ -211,6 +217,9 @@ class Detection:
     area: float = 0.0                # full-res px^2, for weighting multi-blob results
     n_blobs: int = 0
     cornered: bool = False           # quad is a real four-corner fit, not a rect
+    # (tilt, area) per photo window in this blob, for _dominant_tilt. Filled in
+    # by detect_all_prints only -- detect_print has no use for it.
+    window_tilts: list = field(default_factory=list)
     ok: bool = False
     reason: str = ""
 
@@ -379,8 +388,13 @@ def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
     seg = _segment_prints(path, size)
     if seg is None:
         return []
-    dets = [d for d in (_blob_detection(seg["labels"], idx, seg["sc"]) for idx in seg["big"])
-            if d is not None]
+    dets = []
+    for idx in seg["big"]:
+        d = _blob_detection(seg["labels"], idx, seg["sc"])
+        if d is None:
+            continue
+        d.window_tilts = _window_tilts(seg["labels"], idx)
+        dets.append(d)
     # Desk glare gets its own blob here just as it does in detect_print, and it
     # is worse in this direction: align_multi crops around the *union* of every
     # blob, so one bright patch off in a corner drags the crop out to cover it
@@ -396,6 +410,52 @@ def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
     biggest = max(d.area for d in dets)
     return [d for d in dets
             if d.area >= 0.25 * biggest or d.fill >= PRINT_FILL] or dets
+
+
+def _window_tilts(labels: np.ndarray, idx: int, min_frac: float = 0.005):
+    """(tilt, area) for each rectangle-like photo window enclosed by one blob.
+
+    A window is a print's own picture area, so its rectangle is the *card's*
+    rectangle -- which is what alignment actually wants. The merged blob's
+    minAreaRect is not: on a staggered pile its tilt is a property of the
+    arrangement's outline, not of any card (one photo's blob read -2.13 degrees
+    while all eight of its windows agreed on roughly level), and a sheen bridged
+    onto the blob skews it further. Windows are immune to both -- they sit inside
+    the cards, where neither the staggering nor the desk reaches.
+
+    Only windows that are themselves near-rectangular count: a window merged into
+    the border by bright print content comes out a ragged blob whose minAreaRect
+    tilt means nothing.
+    """
+    comp = (labels == idx).astype(np.uint8)
+    ys, xs = np.where(comp)
+    if len(ys) == 0:
+        return []
+    y0, y1, x0, x1 = ys.min(), ys.max(), xs.min(), xs.max()
+    sub = comp[y0:y1 + 1, x0:x1 + 1]
+    notpaper = np.pad((1 - sub).astype(np.uint8), 1, constant_values=1)
+    ffmask = np.zeros((notpaper.shape[0] + 2, notpaper.shape[1] + 2), np.uint8)
+    filled = notpaper.copy()
+    cv2.floodFill(filled, ffmask, (0, 0), 2)
+    holes = (((notpaper == 1) & (filled != 2))[1:-1, 1:-1]).astype(np.uint8)
+    n, lbl, stats, _ = cv2.connectedComponentsWithStats(holes, 8)
+    area_min = min_frac * sub.shape[0] * sub.shape[1]
+
+    out = []
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area <= area_min:
+            continue
+        cnts = cv2.findContours((lbl == i).astype(np.uint8),
+                                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+        if not cnts:
+            continue
+        rect = cv2.minAreaRect(max(cnts, key=cv2.contourArea))
+        rw, rh = rect[1]
+        if min(rw, rh) < 5 or area / max(rw * rh, 1e-6) < WINDOW_RECT_MIN:
+            continue
+        out.append((_tilt_deg(cv2.boxPoints(rect)), float(area)))
+    return out
 
 
 def count_windows(path: str, size: int = 1400) -> int | None:
@@ -455,8 +515,19 @@ def _dominant_tilt(dets: list[Detection]) -> float:
     as _tilt_deg: a plain mean of +44 and -44 would land on 0, not on the true
     answer of (roughly) +45 or -45.
     """
-    tilts = np.radians([_tilt_deg(d.quad) for d in dets])
-    weights = np.array([d.area for d in dets])
+    # Prefer the photo windows' own angles when there are enough of them: a
+    # merged blob's rectangle describes the *pile's outline*, which on a
+    # staggered arrangement is tilted even when every card in it is level, and a
+    # bridged-on sheen tilts it further. The windows sit inside the cards, out of
+    # reach of both. Falls back to the blob rectangles when too few windows are
+    # rectangular enough to trust (see _window_tilts).
+    windows = [wt for d in dets for wt in d.window_tilts]
+    if len(windows) >= MIN_TILT_WINDOWS:
+        tilts = np.radians([t for t, _ in windows])
+        weights = np.array([a for _, a in windows], dtype=float)
+    else:
+        tilts = np.radians([_tilt_deg(d.quad) for d in dets])
+        weights = np.array([d.area for d in dets])
     theta4 = tilts * 4
     mean4 = np.arctan2(np.average(np.sin(theta4), weights=weights),
                         np.average(np.cos(theta4), weights=weights))

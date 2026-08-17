@@ -687,6 +687,30 @@ into the border -- which would have collapsed that crop to a fraction of the pil
 and silently cut prints off. Not shipped: an extra band of desk is a far better
 failure than a cut print.
 
+## Frame tilt read off the photo windows (2026-08-16)
+
+Letting more piles crop (above) exposed a latent weakness: 052545093 had been
+declining, and once it cropped it came out askew. Its merged blob's minAreaRect
+reads -2.13 degrees, but that rectangle describes the *pile's outline* -- a
+staggered arrangement of eight level cards is itself a tilted shape -- and a
+sheen bridged onto the blob tilts it further. All eight of that photo's windows
+agreed on -0.27 degrees, i.e. level.
+
+`_dominant_tilt()` now averages the photo windows' own angles when at least
+`MIN_TILT_WINDOWS` (2) of them are rectangular enough to trust
+(`WINDOW_RECT_MIN`, 0.75), falling back to the blob rectangles otherwise. A
+window is a print's picture area, so its rectangle is the card's rectangle, and
+it sits inside the card where neither the staggering nor the desk reaches.
+
+052545093 now levels correctly. Declines across `chekis/main/` fell again, 6 to
+3 (13 before this run of work). Every previously-good crop stayed put except two
+that picked up a 42-62 px imbalance from the slightly different angle -- both
+still contain every print with margin on all sides.
+
+This is also the first piece of the window-detection work: `_window_tilts()`
+extracts per-window rectangles, which is the geometry the remaining sheen
+problems need.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
