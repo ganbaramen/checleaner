@@ -103,6 +103,13 @@ on `#pick`, wait for `#status` to start with `done`, then read `#flags` and
   has weak face evidence *and* another turn is decisively better. Do not loosen
   that margin to catch a few more — its whole job is to never turn a frame that
   was already right. It also must stay a no-op when the model is missing.
+- **The detection thresholds are calibrated against the real library, not
+  guessed** — `PRINT_FILL`, `CARD_OPP_MIN`/`CARD_AREA_MIN`/`CARD_SOLIDITY_MIN`,
+  `MULTI_WINDOWS`, `PAPER_HALO`. Each sits in a measured gap between real cards
+  and merged piles (see `docs/PIPELINE.md` § 3 and the 2026-08-16 entries in
+  `docs/HISTORY.md`), and several are only a few points wide. Before moving one,
+  sweep `chekis/main/` and check what reclassifies — the failure mode is silent:
+  a pile cropped as a card comes out mangled, with nothing flagged.
 
 ## Conventions
 

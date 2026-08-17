@@ -57,6 +57,25 @@ except ImportError:
 ASPECT = 86.0 / 54.0
 EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
 
+# A secondary blob counts as a real second print only if it is this rectangular.
+# A specular highlight on the desk segments as its own bright, near-neutral blob
+# but is never a clean rectangle (fill ~0.8 against a real card's ~0.99), so this
+# keeps desk glare from making a lone card read as multi-print. Well below any
+# real card, well above the glare actually seen.
+PRINT_FILL = 0.90
+
+# How card-like a four-corner fit must be before it is trusted over the blob's
+# minAreaRect: opposite sides within this ratio, and the quad filling this much
+# of its own bounding rectangle. See _card_quad.
+CARD_OPP_MIN = 0.97
+CARD_AREA_MIN = 0.97
+# Solidity floor for a blob whose four corners fitted (see _card_quad). A card
+# shot at an angle loses a little solidity to its own ragged mask edge -- two
+# real ones measured 0.957 and 0.962 against the square-on floor of 0.97 -- so
+# the corner fit buys a small relaxation, but no more: the overlapping 2-print
+# blob this has to keep out measured 0.916.
+CARD_SOLIDITY_MIN = 0.95
+
 
 # ---------------------------------------------------------------- colour space
 
@@ -185,11 +204,13 @@ def apply(rgb8: np.ndarray, gain, off, gamma, white_t, black_t) -> np.ndarray:
 @dataclass
 class Detection:
     quad: np.ndarray | None = None   # 4x2 in full-res coords, long edge first
-    aspect: float = 0.0
+    aspect: float = 0.0              # of `quad`: the corner fit when there is one
+    rect_aspect: float = 0.0         # always the blob's minAreaRect -- see detect_print
     fill: float = 0.0                # how rectangular the detected blob is
     solidity: float = 1.0            # raw contour area / hull area -- see _blob_detection
     area: float = 0.0                # full-res px^2, for weighting multi-blob results
     n_blobs: int = 0
+    cornered: bool = False           # quad is a real four-corner fit, not a rect
     ok: bool = False
     reason: str = ""
 
@@ -220,6 +241,53 @@ def _segment_prints(path: str, size: int = 1100):
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     big = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] > 0.03 * H * W]
     return dict(labels=labels, stats=stats, big=big, sc=sc)
+
+
+def _card_quad(labels: np.ndarray, idx: int, sc: float):
+    """The blob's own four corners as a (possibly keystoned) quad, or None.
+
+    A card photographed at an angle is a trapezoid, not a rotated rectangle, and
+    `minAreaRect` can only give the latter -- it circumscribes the trapezoid, so
+    it reads too wide (real cards measured 1.485-1.51 against instax's 1.593)
+    and, used as the crop source, leaves `warp`'s perspective transform nothing
+    to correct: it degenerates to an affine map, so the crop keeps the keystone
+    and spills desk on the near edge. Fitting the actual corners fixes both.
+
+    Returns None unless the fit really looks like one card seen at an angle:
+    exactly four convex corners, opposite sides within CARD_OPP_MIN of each
+    other, and the quad filling CARD_AREA_MIN of its own bounding rectangle.
+    Merged multi-print blobs fail these comfortably (0.52-0.90 against a real
+    card's 0.98+), so this can't quietly turn a pile into a card.
+    """
+    comp = (labels == idx).astype(np.uint8)
+    contour = max(cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0],
+                  key=cv2.contourArea)
+    peri = cv2.arcLength(contour, True)
+    quad = None
+    for frac in np.arange(0.005, 0.10, 0.002):       # loosen until it simplifies to 4 corners
+        ap = cv2.approxPolyDP(contour, frac * peri, True)
+        if len(ap) == 4:
+            quad = ap.reshape(4, 2).astype(np.float32)
+            break
+    if quad is None or not cv2.isContourConvex(quad):
+        return None
+
+    centre = quad.mean(axis=0)                        # order corners by angle
+    quad = quad[np.argsort(np.arctan2(quad[:, 1] - centre[1], quad[:, 0] - centre[0]))]
+    e = [float(np.linalg.norm(quad[(i + 1) % 4] - quad[i])) for i in range(4)]
+    if min(e) < 1:
+        return None
+    if (min(e[0], e[2]) / max(e[0], e[2]) < CARD_OPP_MIN
+            or min(e[1], e[3]) / max(e[1], e[3]) < CARD_OPP_MIN):
+        return None
+    rect_area = cv2.contourArea(cv2.boxPoints(cv2.minAreaRect(quad)))
+    if rect_area < 1 or cv2.contourArea(quad) / rect_area < CARD_AREA_MIN:
+        return None
+
+    if (e[0] + e[2]) < (e[1] + e[3]):                 # long edge first, as _blob_detection
+        quad = np.roll(quad, -1, axis=0)
+        e = [float(np.linalg.norm(quad[(i + 1) % 4] - quad[i])) for i in range(4)]
+    return quad / sc, (e[0] + e[2]) / (e[1] + e[3])
 
 
 def _blob_detection(labels: np.ndarray, idx: int, sc: float) -> Detection | None:
@@ -276,7 +344,29 @@ def detect_print(path: str, size: int = 1100) -> Detection:
     d = _blob_detection(seg["labels"], idx, seg["sc"])
     if d is None:
         return Detection(n_blobs=len(big), reason="degenerate fit")
-    d.n_blobs = len(big)
+    # Prefer the blob's real corners when they look like one card seen at an
+    # angle: minAreaRect circumscribes a keystoned card, reading too wide and
+    # cropping it off-square. Only detect_print does this -- detect_all_prints
+    # feeds align_multi, which wants each blob's minAreaRect tilt.
+    # `rect_aspect` keeps the original measurement so the near-miss band, which
+    # was calibrated on it, keeps classifying the same photos the same way.
+    d.rect_aspect = d.aspect
+    cq = _card_quad(seg["labels"], idx, seg["sc"])
+    if cq is not None:
+        d.quad, d.aspect = cq
+        d.cornered = True
+    # Count card-shaped blobs, not every bright one. The largest is the primary
+    # print and always counts; a secondary blob counts only if it is itself
+    # rectangular enough to be a real second print (>= PRINT_FILL), so a desk
+    # highlight can't make a clean single card read as multi-print.
+    n = 1
+    for i in big:
+        if i == idx:
+            continue
+        di = _blob_detection(seg["labels"], i, seg["sc"])
+        if di is not None and di.fill >= PRINT_FILL:
+            n += 1
+    d.n_blobs = n
     return d
 
 
@@ -369,39 +459,82 @@ CROP_ASPECTS = [
     ("1:1", 1.0),
     ("16:9", 16 / 9),
 ]
+# Breathing room around the prints in an aligned crop, as a fraction of the
+# prints' own extent -- taken only when there's desk to spend on it (see the
+# fallback in align_multi), so a frame-filling pile still crops rather than
+# leaving prints jammed to the edge or declining outright.
+CROP_MARGIN = 0.04
+# How far past the detection blob to look for the prints' true paper extent,
+# as a fraction of the blob's own size. See _paper_bbox.
+PAPER_HALO = 0.20
 
 
-def _paper_center(bgr: np.ndarray, blob_bbox, scale=0.25):
-    """Centre of the bright, near-neutral paper inside `blob_bbox`, or None.
+def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
+    """Bounding box `(cx, cy, half_w, half_h)` of the bright, near-neutral paper
+    inside `blob_bbox`, or None to fall back to the blob's own bbox.
 
-    Used only to recentre a multi-print crop, so it must be *tighter* than the
-    detection blob, never looser: it opens (to shed stray bright specks) but does
-    not close (the close is what bridged the blob into desk glare in the first
-    place). The result is trusted only when it lands inside the blob's own bbox
-    and covers a real amount of it -- otherwise the blob centre stands.
+    Used to crop a multi-print frame to the *actual prints* rather than the raw
+    detection blob. The segmentation close that bridges each print's photo
+    window also reaches past the prints -- into desk glare, a cast shadow, or a
+    dark gap between scattered cards -- extending the blob beyond the real paper.
+    Cropping to that blob then either lops a margin off one side (the crop slides
+    to the blob's phantom centre) or, on a scattered pile, cuts a real card off
+    the edge. Paper here is bright-and-neutral *opened but not closed* (the close
+    is exactly what overshot), so its bbox is the true card extent -- centre and
+    size both come from it.
+
+    Trusted only when it tracks the blob's size: much smaller means the test
+    missed prints, much larger means it grabbed a wall or blown desk. Otherwise
+    the blob bbox stands.
     """
     x0, y0, x1, y1 = blob_bbox
-    small = cv2.resize(bgr, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    # Search the blob's bbox plus a modest halo, not the whole rotated frame.
+    # The halo matters in both directions: the segmentation can clip a card's
+    # outer border (the blob's rect then cuts a whole print row off the crop),
+    # so paper just outside the blob has to be reachable -- but searching the
+    # entire frame instead pulls in distant bright patches, over-growing the
+    # crop until it no longer fits and align_multi declines outright.
+    hx, hy = PAPER_HALO * (x1 - x0), PAPER_HALO * (y1 - y0)
+    ix0, iy0 = max(0, int(x0 - hx)), max(0, int(y0 - hy))
+    ix1, iy1 = min(bgr.shape[1], int(x1 + hx)), min(bgr.shape[0], int(y1 + hy))
+    if ix1 - ix0 < 4 or iy1 - iy0 < 4:
+        return None
+    region = bgr[iy0:iy1, ix0:ix1]
+    small = cv2.resize(region, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     lab = cv2.cvtColor(cv2.GaussianBlur(small, (5, 5), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
     L, A, B = lab[:, :, 0], lab[:, :, 1], lab[:, :, 2]
     pm = ((L > 0.62 * np.percentile(L, 99)) & (np.hypot(A - 128, B - 128) < 16)).astype(np.uint8)
     pm = cv2.morphologyEx(pm, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    ys, xs = np.where(pm)
-    if len(ys) < 200:
+    if int(pm.sum()) < 200:
         return None
-    px0, py0, px1, py1 = xs.min() / scale, ys.min() / scale, xs.max() / scale, ys.max() / scale
+
+    # Keep only paper that actually belongs to this pile -- components reaching
+    # into the blob's own footprint. A card whose border the segmentation clipped
+    # is contiguous with the pile and survives; an unrelated bright patch out in
+    # the halo does not, which is what kept the crop from ballooning until it no
+    # longer fitted (three photos declined outright before this).
+    n, lbl, st, _ = cv2.connectedComponentsWithStats(pm, 8)
+    bx0, by0 = (x0 - ix0) * scale, (y0 - iy0) * scale
+    bx1, by1 = (x1 - ix0) * scale, (y1 - iy0) * scale
+    keep = []
+    for i in range(1, n):
+        cx0, cy0 = st[i, cv2.CC_STAT_LEFT], st[i, cv2.CC_STAT_TOP]
+        cx1 = cx0 + st[i, cv2.CC_STAT_WIDTH]
+        cy1 = cy0 + st[i, cv2.CC_STAT_HEIGHT]
+        if st[i, cv2.CC_STAT_AREA] < 50:
+            continue
+        if cx1 > bx0 and cx0 < bx1 and cy1 > by0 and cy0 < by1:
+            keep.append((cx0, cy0, cx1, cy1))
+    if not keep:
+        return None
+    px0 = ix0 + min(k[0] for k in keep) / scale
+    py0 = iy0 + min(k[1] for k in keep) / scale
+    px1 = ix0 + max(k[2] for k in keep) / scale
+    py1 = iy0 + max(k[3] for k in keep) / scale
     pw, ph, bw, bh = px1 - px0, py1 - py0, x1 - x0, y1 - y0
-    # The paper span should track the blob's: much smaller means the test missed
-    # prints, much larger means it grabbed something past them (a bright wall,
-    # blown desk). Either way, don't trust it. A few px of overshoot is normal --
-    # paper detection catches the true border edge the blob's rect can undercut.
     if not (0.5 * bw <= pw <= 1.3 * bw and 0.5 * bh <= ph <= 1.3 * bh):
         return None
-    pcx, pcy = (px0 + px1) / 2, (py0 + py1) / 2
-    # only a gentle recentre; a big shift means the paper read is unreliable
-    if abs(pcx - (x0 + x1) / 2) > 0.15 * bw or abs(pcy - (y0 + y1) / 2) > 0.15 * bh:
-        return None
-    return pcx, pcy
+    return (px0 + px1) / 2, (py0 + py1) / 2, pw / 2, ph / 2
 
 
 def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
@@ -449,16 +582,14 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     bw2, bh2 = (x1 - x0) / 2, (y1 - y0) / 2
 
-    # Recentre on the *actual* paper. The detected blob can overshoot the prints
-    # at one edge -- the segmentation close that bridges each print's photo
-    # window also bridges a print to bright desk glare or a shadow just past it
-    # -- which slides the crop off centre, so one margin vanishes while the
-    # opposite grows (a real complaint on ~1 photo in 5). Paper here is
-    # bright-and-neutral *opened but not closed*: the close is exactly what
-    # reaches into the glare, so leaving it out gives the true paper edge.
-    pcenter = _paper_center(rotated, (x0, y0, x1, y1))
-    if pcenter is not None:
-        cx, cy = pcenter
+    # Crop to the *actual* paper, not the raw blob: the blob can overshoot the
+    # prints (desk glare or a dark gap bridged in by the segmentation close),
+    # which either slides the crop off centre -- one margin vanishing while the
+    # opposite grows -- or, on a scattered pile, cuts a card off the edge. Both
+    # centre and size come from the paper bbox when it's trustworthy.
+    pb = _paper_bbox(rotated, (x0, y0, x1, y1))
+    if pb is not None:
+        cx, cy, bw2, bh2 = pb
 
     # does a crop stay inside the photo's real (unrotated) footprint, or would
     # it reach past an edge into the blank fill the rotation opened up?
@@ -468,7 +599,11 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         corners = np.array([[cx - hw, cy - hh], [cx + hw, cy - hh],
                             [cx + hw, cy + hh], [cx - hw, cy + hh]], np.float32)
         back = cv2.transform(corners.reshape(-1, 1, 2), invM).reshape(-1, 2)
-        pad = 0.5
+        # A hair of slack: a pile that fills the frame can miss by a pixel or
+        # two and there is nothing to gain from declining over that -- the
+        # integer crop is clamped to the canvas anyway, so an overshoot this
+        # small cannot show a meaningful wedge of the blank the rotation opened.
+        pad = 0.002 * max(w, h)
         return ((back[:, 0] >= -pad).all() and (back[:, 0] <= w + pad).all()
                 and (back[:, 1] >= -pad).all() and (back[:, 1] <= h + pad).all())
 
@@ -481,6 +616,14 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
             best = (score, label, hw, hh)
     if best is not None:
         _, crop_label, hw, hh = best
+        # A little breathing room so prints aren't jammed against the crop edge
+        # on the pinned axis -- but only if there's desk to spend on it, and
+        # only *after* the shape is settled: growing before choosing would let
+        # a frame-filling pile pick a worse-fitting aspect just because the
+        # better one no longer fit with margin added.
+        grown_w, grown_h = hw * (1 + CROP_MARGIN), hh * (1 + CROP_MARGIN)
+        if fits(grown_w, grown_h):
+            hw, hh = grown_w, grown_h
     else:
         # the frame's own shape (as turned) -- exactly the pre-CROP_ASPECTS
         # behaviour, and by construction of new_w/new_h it can only fail the
@@ -898,12 +1041,21 @@ def run(args) -> int:
 
         if not args.no_crop:
             det = detect_print(path)
+            # A fitted four-corner card (det.cornered) has already proved itself
+            # rectangular in a way a merged pile can't fake, so it earns a small
+            # solidity relaxation -- an angled card's mask edge is slightly
+            # raggeder than a square-on one's. See CARD_SOLIDITY_MIN.
+            solidity_floor = (min(args.min_solidity, CARD_SOLIDITY_MIN)
+                              if det.cornered else args.min_solidity)
             single = (det.quad is not None and det.n_blobs == 1
                       and args.aspect_lo <= det.aspect <= args.aspect_hi
                       and det.fill >= args.min_fill
-                      and det.solidity >= args.min_solidity)
+                      and det.solidity >= solidity_floor)
+            # Near-miss stays on the blob's own minAreaRect aspect, which is what
+            # this band was calibrated against; reading it off the corner fit
+            # instead pulls in photos that were classifying fine as multi-print.
             near_miss = (det.quad is not None and det.n_blobs == 1
-                         and 1.40 <= det.aspect <= 1.90)
+                         and 1.40 <= det.rect_aspect <= 1.90)
             # Photo-window backstop for a single card-shaped blob: several prints
             # in a tidy row merge into one clean rectangle that can pass the tight
             # single test outright (aspect in range, no seams for fill/solidity to

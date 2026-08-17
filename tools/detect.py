@@ -31,21 +31,23 @@ import cv2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from checleaner import (build_parser, detect_print, detect_all_prints,
-                        align_multi, warp, orient, trim_desk)
+                        align_multi, warp, orient, trim_desk, CARD_SOLIDITY_MIN)
 
 
 def classify(det, d) -> str:
     """run()'s single / near-miss / multi decision for one Detection, kept
     byte-for-byte in step with the branch in run() -- if that changes, change
     this too, or the preview lies."""
+    solidity_floor = (min(d.min_solidity, CARD_SOLIDITY_MIN)
+                      if det.cornered else d.min_solidity)
     single = (det.quad is not None and det.n_blobs == 1
               and d.aspect_lo <= det.aspect <= d.aspect_hi
               and det.fill >= d.min_fill
-              and det.solidity >= d.min_solidity)
+              and det.solidity >= solidity_floor)
     if single:
         return "single"
     near_miss = (det.quad is not None and det.n_blobs == 1
-                 and 1.40 <= det.aspect <= 1.90)
+                 and 1.40 <= det.rect_aspect <= 1.90)
     return "single?" if near_miss else "multi"
 
 

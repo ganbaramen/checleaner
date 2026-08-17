@@ -578,6 +578,56 @@ safe (a flag costs a look; a wrongly-accepted grid, the bug solidity fixes,
 costs a mangled photo) -- and the file still gets a correct colour-balanced
 whole image, just not the auto-crop.
 
+## A new batch surfaces four distinct detection bugs (2026-08-16)
+
+A fresh batch came with 16 reported problems. They turned out to be four
+separate causes, each fixed independently:
+
+**1. Desk glare counted as a second print.** Four flawless single cards
+(053032673, 145749754, 145802658, 145817569 -- aspect 1.577-1.585, fill ≥ 0.99)
+were routed down the multi-print path because a specular highlight on the desk
+segments as its own bright, near-neutral blob and broke the `n_blobs == 1` test.
+Glare is never rectangular: those second blobs measured fill 0.78-0.82. Only
+blobs at `PRINT_FILL` (0.90) or better now count toward the total.
+
+**2. `minAreaRect` can't represent a card shot at an angle.** 073304486 and
+073350228 are clean singles that measured aspect 1.506 and 1.485 -- outside the
+[1.53, 1.65] accept band -- because a keystoned card is a trapezoid and
+`minAreaRect` circumscribes it. Worse, feeding that rect to `warp` as the crop
+source leaves its perspective transform nothing to correct (it degenerates to
+affine), so the keystone survived into the output and desk spilled in on the
+near edge: the "not cropped to correct size" complaint. `_card_quad()` fits the
+four real corners and both files then measure 1.600 and 1.604; residual desk on
+the near edge went 25 → 0 and 36 → 0 px. Guarded so a merged pile can't be
+promoted (convex, opposite sides within 3%, ≥ 97% of its own bounding rect --
+piles score 0.52-0.90). A fitted card also earns a gentler solidity floor
+(0.95): angled cards measured 0.957 and 0.962 against the square-on 0.97. The
+relaxation is small on purpose -- an overlapping 2-print blob that *does* pass
+the corner test measured 0.916 and must stay out. The near-miss band still reads
+the old `minAreaRect` aspect, since switching it pulled correctly-classified
+multi-print photos into review for nothing.
+
+**3. Aligned crops cut cards off.** The margin recentre added earlier moved the
+crop's centre but kept it blob-*sized*, so on a scattered pile it slid real
+cards off the edge. `_paper_bbox()` now sets centre *and* size from the true
+paper. Where it looks turned out to matter in both directions: scanning the
+whole rotated frame pulls in distant bright patches and over-grows the crop
+until alignment declines outright (141154707, 153603211 both declined), while
+scanning only inside the blob can't recover a border the segmentation clipped --
+031653214 lost the top row of a nine-print pile that way, its blob stopping
+317 px short of the real paper. A `PAPER_HALO` of 20% around the blob satisfies
+both.
+
+**4. Prints jammed against the crop edge.** `CROP_MARGIN` (4%) adds breathing
+room, applied after the aspect is chosen and only if the grown crop still fits.
+Applying it before broke the choice: a frame-filling pile picked a worse-fitting
+shape purely because the better one no longer fit with margin added (caught by
+`test_align_crop_picks_best_fit_aspect`, which flipped 4:3 → 1:1).
+
+Reclassification across the whole library was verified file by file at each
+step: the glare fix moved exactly the four cards, and the corner fit moved
+exactly the two, with nothing else changing.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

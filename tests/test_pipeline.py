@@ -86,6 +86,22 @@ def make_single(frame_w=1200, upside_down=False, seed=0):
     return img.astype(np.uint8)
 
 
+def make_single_with_glare(frame_w=1200, seed=0):
+    """A lone card plus a patch of specular desk glare: bright and near-neutral
+    enough to segment as its own blob, but blobby rather than rectangular."""
+    img = make_single(frame_w, seed=seed).astype(np.float32)
+    h, w = img.shape[:2]
+    # An ellipse (fill = pi/4 ~ 0.785, right where real glare measured), big
+    # enough to clear the 3%-of-frame blob threshold, and far enough below the
+    # card that the segmentation close can't bridge the two into one blob.
+    cy, cx = h - int(h * 0.06), w // 2
+    ry, rx = int(h * 0.05), int(w * 0.25)
+    yy, xx = np.ogrid[:h, :w]
+    blob = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2 <= 1.0
+    img[blob] = np.clip(BORDER + _noise((int(blob.sum()), 3), 2, seed + 9), 0, 255)
+    return img.astype(np.uint8)
+
+
 def make_row(frame_w=1400, cols=2, seed=0):
     """Several prints touching in a row -- they merge into one blob far too wide
     to be a single card. The everyday multi-print shot."""
@@ -165,6 +181,23 @@ def test_single_card_detects_at_true_aspect():
     assert abs(d.aspect - ASPECT) < 0.03, f"aspect={d.aspect:.3f}, want ~{ASPECT:.3f}"
     assert d.fill >= DEFAULTS.min_fill and d.solidity >= DEFAULTS.min_solidity
     assert _is_single(d), "a clean single card must classify as single"
+
+
+def test_desk_glare_does_not_make_a_single_look_multi():
+    """A specular highlight on the desk segments as its own bright, near-neutral
+    blob. It used to break the n_blobs == 1 test and push flawless single cards
+    down the multi-print path; only card-shaped blobs count toward the total, and
+    glare is never rectangular."""
+    p = _write(make_single_with_glare())
+    try:
+        d = detect_print(p)
+        seg = checleaner._segment_prints(p, 1100)
+        n_bright = len(seg["big"])
+    finally:
+        os.remove(p)
+    assert n_bright >= 2, "fixture no longer produces a separate glare blob; retune it"
+    assert d.n_blobs == 1, f"glare counted as a print (n_blobs={d.n_blobs})"
+    assert _is_single(d), "a single card beside desk glare must still classify as single"
 
 
 def _window_gaps(crop_bgr):
@@ -295,6 +328,33 @@ def test_real_grid_photo_fails_solidity():
         skip("grid reference photo not present")
     d = detect_print(path)
     assert d.solidity < DEFAULTS.min_solidity, f"real grid solidity {d.solidity:.3f} no longer caught"
+
+
+def test_real_angled_cards_fit_their_corners():
+    """Two real cards shot at an angle. minAreaRect circumscribes a keystoned
+    card, so it read 1.485 and 1.506 -- outside the accept band -- and as the
+    crop source left warp's perspective transform nothing to correct. The
+    four-corner fit recovers the true instax aspect and they classify as single.
+    Synthetic keystone doesn't reproduce this (it biases the rect the other way),
+    so the assertion lives on the real files."""
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    checked = 0
+    for name in ["PXL_20260401_073304486.MP.jpg", "PXL_20260401_073350228.MP.jpg"]:
+        path = os.path.join(folder, name)
+        if not os.path.exists(path):
+            continue
+        checked += 1
+        d = detect_print(path)
+        assert d.cornered, f"{name}: four-corner fit rejected"
+        assert d.rect_aspect < DEFAULTS.aspect_lo, (
+            f"{name}: minAreaRect reads {d.rect_aspect:.3f}, no longer the case this guards")
+        assert abs(d.aspect - ASPECT) < 0.02, (
+            f"{name}: corner aspect {d.aspect:.3f}, want ~{ASPECT:.3f}")
+        assert _is_single(d), f"{name}: should classify as single"
+    if checked == 0:
+        skip("neither angled reference photo is present")
 
 
 def test_real_window_counts_split_near_misses_from_singles():

@@ -92,6 +92,28 @@ old method's 1.54–1.62 (and one photo the old mask fitted at 1.43). The paper
 border is the more distinctive feature — bright and neutral is something desk
 never is.
 
+**"One large blob" means one card-shaped blob.** A specular highlight on the
+desk is bright and near-neutral enough to survive segmentation as its own
+component, and any second component used to break the `n_blobs == 1` test — so
+four flawless single cards (aspect 1.577–1.585, fill ≥ 0.99) were being routed
+down the multi-print path by a patch of desk glare. Glare is never rectangular
+though: those blobs measured fill 0.78–0.82 against a real card's 0.99. Only
+secondary blobs at `fill ≥ PRINT_FILL` (0.90) count toward the total, so the
+largest blob always counts and a highlight never does.
+
+**Corners, not a bounding rectangle.** A card photographed at an angle is a
+trapezoid, and `minAreaRect` can only circumscribe it — so it reads too wide
+(real cards measured 1.485 and 1.506 against instax's 1.593, falling out of the
+accept band entirely) and, handed to `warp` as the crop source, leaves the
+perspective transform nothing to correct: it degenerates to an affine map, the
+keystone survives, and desk spills in on the near edge. `_card_quad()` fits the
+blob's four actual corners (`approxPolyDP`, loosening ε until it simplifies to
+4 points) and those two files then measure 1.600 and 1.604. It is used only
+when the fit really looks like one card seen at an angle — convex, opposite
+sides within 3%, and filling ≥ 97% of its own bounding rectangle. Merged piles
+score 0.52–0.90 on those, so a pile can't be quietly promoted to a card. When
+no fit qualifies, the `minAreaRect` quad stands.
+
 Accept the fit only if: exactly one large blob, aspect ∈ [1.53, 1.65], fill
 ≥ 0.93, **and solidity ≥ 0.97**. Fill is measured on the convex hull, so a
 frame with an unfilled middle still scores ~1 — which is also the hole this
@@ -105,10 +127,20 @@ merged grid measures noticeably lower — 0.94 on the one that motivated this,
 against 0.99+ on every known-good single card checked. See `docs/HISTORY.md`
 (2026-08-16) for the numbers.
 
+A card whose four corners fitted (above) gets a slightly gentler solidity floor,
+`CARD_SOLIDITY_MIN` = 0.95: shot at an angle its mask edge comes out a little
+raggeder, and two real ones measured 0.957 and 0.962. The relaxation is
+deliberately small — the overlapping 2-print blob it has to keep out measured
+0.916, and that blob *does* pass the corner test, so the corner fit alone is not
+enough to admit a card.
+
 If the fit fails and the aspect is *far* out of range, that is an ordinary
 multi-print photo — balance it and leave it whole, no flag. Only a near-miss
 (aspect 1.40–1.90, i.e. roughly card-shaped but failing the tight test) is worth a
-human look, because that is what a genuinely bad fit looks like.
+human look, because that is what a genuinely bad fit looks like. That band reads
+the **blob's `minAreaRect` aspect**, not the corner fit — it was calibrated
+against the former, and switching it pulled photos that were classifying
+correctly as multi-print into review for no gain.
 
 **Overlapping prints** are the hard case, and a photo-window count is the
 backstop. Prints laid over each other merge into one blob whose shape stats can
@@ -269,13 +301,28 @@ segmentation *close* that bridges each print's photo window (§ 3) will also
 bridge a print to a patch of bright desk glare or a shadow just past it, and
 that phantom extent slides the bounding box — and so the crop — off the prints,
 leaving one margin at zero while the opposite one grows (a real, visible
-complaint on roughly one aligned photo in five). So the crop is recentred on
-the *actual* paper: bright-and-near-neutral pixels, **opened but not closed**,
-since the close is exactly what reached into the glare. The recentre is trusted
-only when that paper span tracks the blob's (not much smaller — missed prints;
-not much larger — grabbed a wall or blown desk) and only shifts the centre
-gently; otherwise the blob centre stands. This dropped the worst top-vs-bottom
-margin gap across `chekis/main/` from 69 px to 6.
+complaint on roughly one aligned photo in five). The same close can also *clip*
+a card's outer border, and then the blob's rect cuts a whole print row off the
+crop. So the crop's centre **and size** both come from `_paper_bbox()`: the
+actual paper, bright-and-near-neutral, **opened but not closed**, since the
+close is exactly what overshot. It is trusted only when that span tracks the
+blob's (not much smaller — missed prints; not much larger — grabbed a wall or
+blown desk); otherwise the blob bbox stands.
+
+Where it looks matters in both directions, and both failure modes are real.
+Searching the whole rotated frame pulls in distant bright patches, over-growing
+the crop until it no longer fits and alignment declines outright; searching only
+inside the blob can't recover a border the segmentation clipped, so a card row
+stays cut off. It searches the blob's bbox plus a `PAPER_HALO` (20%) margin.
+Together these dropped the worst top-vs-bottom margin gap across `chekis/main/`
+from 69 px to 6, and stopped a nine-print pile losing its top row.
+
+Finally, `CROP_MARGIN` (4%) adds a little breathing room so prints aren't jammed
+against the crop edge. It is applied **after** the aspect is chosen and only if
+the grown crop still fits: growing before choosing would let a frame-filling
+pile pick a worse-fitting shape merely because the better one no longer fit with
+margin added, and a pile with no desk to spare keeps its tight crop rather than
+being pushed into declining.
 
 The crop's shape comes from `CROP_ASPECTS` (4:3, 3:4, 1:1, 16:9 — a plain
 list, extend it there). For each candidate, the tightest crop at that ratio
