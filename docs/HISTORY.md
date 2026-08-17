@@ -817,6 +817,39 @@ Across the library: worst margin asymmetry fell from 253 px to 112, declines
 went 3 -> 4 (two frame-filling piles whose prints genuinely run off the frame),
 and 84 balanced / 22 review. 19 tests pass.
 
+## Crops stopped cutting rows: the nudge cap is the crop's own slack (2026-08-17)
+
+Three photos came back with a whole row of prints missing (155935560,
+154257343, 055435791). Two mechanisms were sliding the crop off the prints, both
+introduced trying to rescue frame-filling piles from declining:
+
+**Shrink-to-fit.** When nothing placed, the target was retried at 97% and 94% of
+its size, on the theory that it would eat the leftover sheen. It cannot: the crop
+has to *contain* the prints, so shrinking it below their own extent eats prints
+and nothing else. All three cut rows trace to the 94% retry. Removed outright --
+a photo left whole beats a photo with a row missing.
+
+**An arbitrary nudge cap.** `place()` could slide the crop by up to 2% of its own
+size to bring it inside the frame. That number has nothing to do with whether a
+print leaves the crop, so it was wrong in both directions: too tight for photos
+that could be placed perfectly safely (155935560's best shape needed a 214 px
+shift into 301 px of spare margin), and able to slide *past* the prints when the
+crop was pinned. The cap is now exactly the crop's own slack, `hw - bw2` per
+axis: inside it a print can never leave the crop, outside it one always does. A
+crop pinned tight on an axis now cannot move along it at all, plus the same
+`pad` of leeway the frame test already allows, so a fractional tilt costing a
+pixel or two at the corners doesn't sink an otherwise fine placement.
+Candidates are also scored on how far they had to slide, so a centred shape beats
+one that only works jammed against an edge.
+
+All three now contain every print. Declines went 4 -> 5: the two extra
+(061906898, 041152515) were previously "cropping" by cutting -- every candidate
+for them needs a shift larger than its slack on the pinned axis, so their prints
+genuinely cannot be framed once levelled, and leaving them whole is the correct
+answer. 155935560 now carries an uneven bottom margin instead of a missing row,
+which is the honest trade: its pile is 1.67:1 and neither 4:3 nor 16:9 fits it
+well.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

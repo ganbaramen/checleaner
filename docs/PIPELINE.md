@@ -420,22 +420,31 @@ into exactly that excluded shape.
 
 **Nudge before bailing out.** The crop must stay inside the photo's real
 (unrotated) footprint, checked by mapping its corners back through the inverse
-rotation. But a crop whose *size* fits can still sit a few pixels over one edge —
-one real photo missed by 14 px of 4080, another by 1 px — and declining there
-throws away a good crop over an offset, so `place()` shifts it back inside
-instead. The shift is capped at `CROP_NUDGE` (2% of the crop's half-size), which
-matters more than it sounds: uncapped, a crop far wider than the pile "fits" once
-slid hard against one edge, which both lets a badly-shaped aspect win the
-selection and dumps all the desk on one side (one photo came out 298 px lopsided).
-Capping it dropped declines across `chekis/main/` from 13 to 6 while leaving every
-already-good crop within a few pixels of centred.
+rotation. But a crop whose *size* fits can still sit over one edge — one real
+photo missed by 14 px of 4080, another by 1 px — and declining there throws away
+a good crop over an offset, so `place()` shifts it back inside instead.
 
-**Shrink a little before bailing out.** A frame-filling pile can miss every
-shape by a few percent, and leaving it uncropped is the worst outcome available,
-so the target is retried at 97% and 94% of its size. What that eats is the
-leftover sheen the blob still carries, since the prints are what set the box in
-the first place. It stops there deliberately: at 90% the crop starts cutting
-real prints, which is worse than not cropping at all.
+**How far it may shift is exactly its own slack**, `hw - bw2` on each axis: the
+margin the crop has beyond the prints. Inside that a print can never leave the
+crop; outside it one always does. That is the whole question, so it is the cap —
+not a percentage. A crop pinned tight on an axis has zero slack there and cannot
+move along it at all, plus the same `pad` of leeway the frame test already allows,
+so a fractional tilt costing a pixel or two at the corners doesn't sink it.
+
+An arbitrary cap was tried first (2% of the crop) and is wrong in both
+directions: too loose and a crop far wider than the pile "fits" slid hard against
+one edge, dumping all the desk on one side (one photo came out 298 px lopsided);
+too tight and photos that could be placed safely declined instead. Worse, a cap
+unrelated to slack lets the crop slide *past* the prints — three photos came back
+with a whole row cut off. Candidates are also scored on how far they had to
+slide, so a shape that sits centred beats one that only works jammed against an
+edge.
+
+**Do not shrink to fit.** A fallback that retried the target a few percent
+smaller looks tempting for a frame-filling pile, on the theory that it eats the
+leftover sheen. It eats prints: the crop must *contain* them, so shrinking below
+their own extent can do nothing else, and three photos came back with a row
+missing. A photo left whole is a far better outcome than one with a row cut off.
 
 **Bail out if even that can't place it.** If no candidate and not the fallback
 ratio can be placed inside the footprint, `align_multi()` returns `None` and the

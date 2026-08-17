@@ -662,9 +662,6 @@ CROP_MARGIN = 0.04
 # How far past the detection blob to look for the prints' true paper extent,
 # as a fraction of the blob's own size. See _paper_bbox.
 PAPER_HALO = 0.20
-# How far an aligned crop may be nudged off the prints' centre to bring it
-# inside the frame, as a fraction of its own half-size. See align_multi's place.
-CROP_NUDGE = 0.02
 
 
 def _paper_bbox(bgr: np.ndarray, blob_bbox, scale=0.25):
@@ -817,14 +814,18 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
 
     def place(hw, hh, iters=8):
         px, py = cx, cy
-        # Cap the nudge. Uncapped, a crop far wider than the pile "fits" once
-        # slid hard against one edge, which both lets a badly-shaped aspect win
-        # the selection and dumps all the desk on one side (one photo came out
-        # 298 px lopsided). A near-miss rescue needs a fraction of a percent.
-        max_nudge = CROP_NUDGE * max(hw, hh)
+        # How far the crop may slide off the prints' centre: exactly its own
+        # slack, the margin it has beyond them. Inside that a print can never
+        # leave the crop, and outside it one always does -- which is the whole
+        # question, so this is the cap rather than some fraction. A crop pinned
+        # tight on an axis (slack 0) cannot move along it at all.
+        # `pad` of leeway on top: the same hair the frame test already allows,
+        # so a crop pinned tight on an axis can still absorb the pixel or two a
+        # fractional tilt costs it at the corners.
+        slack_x, slack_y = max(0.0, hw - bw2) + pad, max(0.0, hh - bh2) + pad
         R = M[:, :2]                                   # original -> rotated, rotation only
         for _ in range(iters):
-            if (px - cx) ** 2 + (py - cy) ** 2 > max_nudge ** 2:
+            if abs(px - cx) > slack_x + 0.5 or abs(py - cy) > slack_y + 0.5:
                 return None
             corners = np.array([[px - hw, py - hh], [px + hw, py - hh],
                                 [px + hw, py + hh], [px - hw, py + hh]], np.float32)
@@ -849,20 +850,26 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         for label, r in CROP_ASPECTS:
             hh = max(bh2 * shrink, bw2 * shrink / r)
             hw = hh * r
-            score = abs((hw - bw2) - (hh - bh2))   # excess margin: 0 on the pinned axis
-            if place(hw, hh) is not None and (found is None or score < found[0]):
+            at = place(hw, hh)
+            if at is None:
+                continue
+            # excess margin (0 on the pinned axis), plus however far the crop had
+            # to slide to fit -- so a shape that sits centred beats one that only
+            # works jammed against an edge, and the desk stays even where it can.
+            score = (abs((hw - bw2) - (hh - bh2))
+                     + 2 * (abs(at[0] - cx) + abs(at[1] - cy)))
+            if found is None or score < found[0]:
                 found = (score, label, hw, hh)
         return found
 
-    # A frame-filling pile can miss every shape by a little, and leaving it
-    # uncropped is the worst outcome available. Let the target shrink by a few
-    # percent as a last resort -- what that eats is the leftover sheen the blob
-    # still carries, since the prints themselves are what set the box.
+    # No shrink-to-fit fallback. One used to live here, retrying the target a few
+    # percent smaller when nothing placed, on the theory that it would eat the
+    # leftover sheen. It ate prints instead -- three photos came back with a whole
+    # row cut off -- because the crop must *contain* the prints and shrinking it
+    # below their own extent cannot do anything else. A photo left whole is a far
+    # better outcome than one with a row missing, and the original-ratio fallback
+    # below already rescues most of these.
     best = choose(1.0)
-    for s in (0.97, 0.94):
-        if best is not None:
-            break
-        best = choose(s)
     if best is not None:
         _, crop_label, hw, hh = best
         # A little breathing room so prints aren't jammed against the crop edge
