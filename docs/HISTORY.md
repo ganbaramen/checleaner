@@ -958,6 +958,51 @@ the second time that tool has been caught blind by a field it wasn't recording
 (the first was output dimensions) — the lesson each time was to make the
 deliberate change first and check the tool *notices*.
 
+## 2026-08-17 — two singles the window backstop was refusing to crop
+
+Reported from `rancheki/`: `033246201` and `033323480`, both plainly one cheki,
+neither being cropped. Both pass the single test comfortably (aspect 1.609 /
+1.595, fill 0.997, solidity 0.994 / 0.996) and both were being demoted by
+`count_windows` returning exactly **7**, the `MULTI_WINDOWS` threshold.
+
+The cause is high-key prints. The paper mask is *bright and near-neutral*, so a
+pale picture — white blouse, bright sky, sun-bleached rock — segments as paper
+and leaves scattered dark specks instead of one photo window. The count then
+measures the print's exposure, not how many prints there are.
+
+Swept `main/` + `rancheki/` for a threshold that separates. There isn't one:
+
+| population | true singles | true multis |
+|---|---|---|
+| passes the confident single test | 44, up to **7** windows | 1, at **7** windows |
+| near-miss only | **0** | 27 |
+
+So the count is worthless exactly where it was doing damage, and free where it
+isn't. Split into two thresholds: `--multi-windows` stays 7 for near-misses,
+`--card-windows` is 8 for confident fits. What actually separates the one pile
+(`main/20260811_012024586`, a 3-print row) from the 44 cards is aspect — cards
+top out at 1.631, it sits at 1.642 — so `--aspect-hi` went 1.65 → 1.64.
+
+Result: **0 files in `main/` reclassify**, and the two rancheki files crop as
+singles. `012024586` still lands in `balanced/` as aligned, now via aspect
+instead of the count.
+
+`tools/detect.py` was reporting "single" for both files while a real run said
+"aligned" — its `classify()` had never mirrored the window backstop, despite a
+docstring promising it stayed in step. Now fixed and passed the real count.
+
+### The third report: a crop about a degree askew
+
+`rancheki/PXL_20260601_053951339` (a 3-print row, near-miss, in `review/`) is
+levelled to −0.0° when its blob reads +1.204°. Two surviving "windows" of 2.6 k
+and 10 k px both report −0.0°, because a rectangle that small snaps to
+axis-aligned, and `MIN_TILT_WINDOWS` (2) lets them outvote the blob.
+
+Five discriminators were measured and all rejected — see `docs/PIPELINE.md` § 6
+for the numbers. Every one buys this degree back by costing tens of degrees on
+staggered piles whose blob tilt is genuinely garbage (one falls back to −33°).
+Left as it is: the file is already flagged for review.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

@@ -149,9 +149,16 @@ errors loudly. There is still no *assertion* harness — see Next steps.
   has weak face evidence *and* another turn is decisively better. Do not loosen
   that margin to catch a few more — its whole job is to never turn a frame that
   was already right. It also must stay a no-op when the model is missing.
+- **`--multi-windows` (7) and `--card-windows` (8) are separate on purpose.**
+  Overruling a *confident* single-card fit needs more evidence than overruling a
+  near-miss, because the first mistake refuses to crop a real print and the
+  second only refiles it. Do not collapse them: of 45 blobs passing the single
+  gate, 44 are real cards reaching 7 windows and the 1 genuine pile also sits at
+  7, so no shared threshold works. See `docs/PIPELINE.md` § 3.
 - **The detection thresholds are calibrated against the real library, not
   guessed** — `PRINT_FILL`, `CARD_OPP_MIN`/`CARD_AREA_MIN`/`CARD_SOLIDITY_MIN`,
-  `MULTI_WINDOWS`, `PAPER_HALO`. Each sits in a measured gap between real cards
+  `MULTI_WINDOWS`, `CARD_WINDOWS`, `PAPER_HALO`, and `--aspect-hi` (1.64, with
+  real singles topping out at 1.631). Each sits in a measured gap between real cards
   and merged piles (see `docs/PIPELINE.md` § 3 and the 2026-08-16 entries in
   `docs/HISTORY.md`), and several are only a few points wide. Before moving one,
   sweep `chekis/main/` and check what reclassifies — the failure mode is silent:

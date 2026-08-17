@@ -33,23 +33,33 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import checleaner
 from checleaner import (build_parser, detect_print, detect_all_prints,
-                        align_multi, warp, orient, trim_desk, CARD_SOLIDITY_MIN)
+                        align_multi, warp, orient, trim_desk, count_windows,
+                        CARD_SOLIDITY_MIN)
 
 
-def classify(det, d) -> str:
+def classify(det, d, windows=None) -> str:
     """run()'s single / near-miss / multi decision for one Detection, kept
     byte-for-byte in step with the branch in run() -- if that changes, change
-    this too, or the preview lies."""
+    this too, or the preview lies.
+
+    It did lie: the photo-window backstop was added to run() and never mirrored
+    here, so this reported "single" for two files a real run demoted to multi.
+    Hence `windows` is not optional in spirit -- pass the count, or the answer
+    is only the pre-backstop half of the decision.
+    """
     solidity_floor = (min(d.min_solidity, CARD_SOLIDITY_MIN)
                       if det.cornered else d.min_solidity)
     single = (det.quad is not None and det.n_blobs == 1
               and d.aspect_lo <= det.aspect <= d.aspect_hi
               and det.fill >= d.min_fill
               and det.solidity >= solidity_floor)
-    if single:
-        return "single"
     near_miss = (det.quad is not None and det.n_blobs == 1
                  and 1.40 <= det.rect_aspect <= 1.90)
+    if (single or near_miss) and windows is not None:
+        if windows >= (d.card_windows if single else d.multi_windows):
+            single = near_miss = False
+    if single:
+        return "single"
     return "single?" if near_miss else "multi"
 
 
@@ -108,13 +118,14 @@ def main() -> int:
     for path in args.files:
         name = os.path.basename(path)
         det = detect_print(path)
-        kind = classify(det, d)
-        extra = ""
+        wins = count_windows(path)
+        kind = classify(det, d, wins)
+        extra = f" windows={wins}" if wins is not None else ""
         if kind == "multi":
             dets = detect_all_prints(path)
             img = cv2.imread(path)
             aligned = align_multi(img, dets) if img is not None else None
-            extra = f"  {len(dets)} blobs, {'level' if aligned is not None else 'whole'}"
+            extra += f"  {len(dets)} blobs, {'level' if aligned is not None else 'whole'}"
         print(f"{name:<38} {kind:<8} n_blobs={det.n_blobs} "
               f"aspect={det.aspect:.3f} fill={det.fill:.3f} solidity={det.solidity:.3f}{extra}")
         if args.sheen:

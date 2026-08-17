@@ -291,17 +291,32 @@ beat a real card's — white border on white border leaves no seam, so fill and
 solidity see nothing (one 4-print row measured fill 0.988, solidity 0.991,
 cleaner than some genuine singles) — but each print's *picture* stays dark and
 separate, an enclosed hole in the paper mask. `count_windows()` counts those
-holes: one card encloses one window, fragmented at most into a few pieces where
-bright content bridges it to the border (worst genuine single in the library:
-6 fragments), while merged multi-print blobs run 7–18. A blob with
-`--multi-windows` (default 7) or more windows can't be one card, so it is
-treated as the multi-print shot it is and sent down the align path.
+holes: one card encloses one window, fragmented into pieces where bright content
+bridges it to the border, while merged multi-print blobs run 7–18. A near-miss
+blob with `--multi-windows` (default 7) or more windows can't be one card, so it
+is treated as the multi-print shot it is and sent down the align path.
 
-This check guards **both** decisions, not just near-misses: a tidy row can slip
-right through the tight single test (one real 3-print row landed aspect 1.639,
-fill 0.994, solidity 0.992 — all inside the gate) and would be warped into a
-single card, betrayed only by a wild border ratio, if the window count didn't
-overrule it too. Only the high side is evidence — a low count proves nothing
+**Two thresholds, because the two mistakes cost different things.** The count
+also guards the confident single test — a tidy row can slip right through it
+(one real 3-print row landed fill 0.994, solidity 0.992) — but there it needs
+`--card-windows` (default 8), not 7. Demoting a near-miss only changes where the
+file is filed; demoting a real card stops it being cropped at all.
+
+That gap is not cosmetic. Measured over `main/` + `rancheki/`, of the 45 blobs
+that pass the confident single test, **44 are real cards reaching up to 7
+windows and the 1 genuine pile among them also sits at 7** — no threshold in
+that population separates them. A high-key print is why: its picture is bright
+enough to segment *as paper*, so what is left is scattered specks, not one
+window. Two rancheki singles counted 7 that way and were refused a crop
+entirely. On the near-miss side the count is free: **no genuine single is ever a
+near-miss** (0 of 27 in the library), so nothing there is at risk.
+
+What actually separates that pile from the cards is **aspect**: real singles top
+out at 1.631, the pile sits at 1.642, which is why `--aspect-hi` is 1.64. Thin,
+but it fails safe — a single reading above it becomes a near-miss and gets a
+look, while a pile below it would be warped into a card.
+
+Only the high side of the count is evidence — a low count proves nothing
 (overlap can hide windows), so a near-miss that *fails* the count stays flagged
 for review rather than being forced through. The count lands in `report.csv`'s
 `windows` column.
@@ -450,6 +465,26 @@ is level — one photo's blob read −2.13° while all eight of its windows agre
 it further. Windows sit inside the cards, out of reach of both. The blob
 rectangles remain the fallback for piles whose windows are too few or too ragged
 (bright print content merges a window into the border).
+
+**Known limitation: two specks can outvote the blob.** When a print is high-key,
+its real picture area segments as paper and is rejected as ragged, while small
+dark patches survive as "windows". A rectangle a few dozen pixels across has no
+usable angle — it snaps to axis-aligned — so `MIN_TILT_WINDOWS` (2) is satisfied
+by two specks both reading −0.0°, and they beat a correct blob tilt.
+`rancheki/PXL_20260601_053951339` is the case: two windows of 2.6 k and 10 k px
+say −0.0° while the blob says +1.204°, and the crop comes out about a degree
+askew.
+
+**Five ways to tell those specks from real windows were measured and all
+failed** — don't reach for them again. Closing the hole mask (the fragments
+aren't adjacent, so no radius merges them); a per-window area floor (2% moves 19
+files, several catastrophically — one staggered pile falls back to a **−33°**
+blob tilt); a minimum rectangle side (real windows go down to 42 px, these are
+45 and 95); window aspect (37% of all real windows are under 1.25, and these are
+1.17–1.24); and total window coverage of the paper (this file is 0.028, *above*
+a pile at 0.022 that must keep its windows). Every lever trades a degree of
+error here for tens of degrees elsewhere, so the tilt is left as it is: the file
+is a near-miss and already goes to `review/` for a look.
 
 **Crop.** After rotating (with the canvas expanded so nothing is clipped),
 take the union bounding box of every detected blob in the rotated frame and

@@ -503,7 +503,7 @@ def test_real_window_counts_split_near_misses_from_singles():
         skip("none of the window-count reference photos are present")
 
 
-def test_row_passing_single_shape_is_caught_by_windows():
+def test_row_that_looks_like_a_card_is_caught_by_aspect_not_windows():
     """A tidy row of prints can pass the single-card SHAPE test outright -- one
     real 3-print row landed aspect 1.639, fill 0.994, solidity 0.992, all inside
     the single gate -- and would be warped into one card if shape were the only
@@ -513,11 +513,30 @@ def test_row_passing_single_shape_is_caught_by_windows():
     if not os.path.exists(path):
         skip("row-shaped reference photo not present")
     d = detect_print(path)
-    passes_shape = (d.n_blobs == 1
-                    and DEFAULTS.aspect_lo <= d.aspect <= DEFAULTS.aspect_hi
-                    and d.fill >= DEFAULTS.min_fill and d.solidity >= DEFAULTS.min_solidity)
-    assert passes_shape, "fixture no longer passes the single shape gate; pick another"
-    assert count_windows(path) >= DEFAULTS.multi_windows, "backstop would miss this row"
+    assert d.fill >= DEFAULTS.min_fill and d.solidity >= DEFAULTS.min_solidity, \
+        "fixture no longer beats fill/solidity; it no longer tests anything"
+    assert d.aspect > DEFAULTS.aspect_hi, \
+        f"aspect {d.aspect:.3f} no longer excludes this row (hi {DEFAULTS.aspect_hi})"
+    assert count_windows(path) < DEFAULTS.card_windows, \
+        "the window count is supposed to be unable to catch this one"
+
+
+def test_window_backstop_is_stricter_for_a_confident_card_fit():
+    """Two thresholds, because the two mistakes cost different things. Demoting
+    a near-miss only refiles it; demoting a confident card fit stops a real
+    print being cropped, which is what a shared threshold of 7 did to two
+    genuine singles whose bright pictures left 7 specks rather than one window."""
+    assert DEFAULTS.card_windows > DEFAULTS.multi_windows, \
+        "overruling a confident fit must need more evidence than overruling a near-miss"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "single.jpg")
+        cv2.imwrite(path, cv2.cvtColor(make_single(), cv2.COLOR_RGB2BGR))
+        det = detect_print(path)
+        assert classify(det, DEFAULTS, DEFAULTS.card_windows - 1) == "single", \
+            "a real card must survive a window count below the card threshold"
+        assert classify(det, DEFAULTS, DEFAULTS.card_windows) == "multi", \
+            "enough windows must still overrule even a confident fit"
 
 
 # Multi-print photos that align_multi levels but leaves mis-turned, with the

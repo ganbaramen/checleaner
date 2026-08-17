@@ -102,6 +102,18 @@ SHEEN_KEEP_MIN = 0.40
 # the rule relative to the batch and free of a second number to calibrate: shoot
 # everything on a new surface and the median simply follows it.
 DESK_CLAMP = (0.86, 1.16)
+# Photo windows needed to overrule a blob that passed the *confident* single-card
+# test, as opposed to a near-miss (--multi-windows, 7). The two are separate
+# because the counts do not separate the two populations and the costs are not
+# symmetric. Measured over main/ + rancheki/: of 45 blobs passing the single
+# gate, 44 are real cards and reach 7 windows (a high-key print's picture is
+# bright enough to segment *as* paper, leaving scattered specks rather than one
+# window), and the single genuine pile among them also sits at 7 -- so no
+# threshold in that population tells them apart. Demoting a near-miss only
+# changes where the file is filed; demoting a real card stops it being cropped
+# at all, which is what a 7 here did to two rancheki singles. What actually
+# separates that pile from the cards is aspect (--aspect-hi), not window count.
+CARD_WINDOWS = 8
 
 
 # ---------------------------------------------------------------- colour space
@@ -1447,11 +1459,16 @@ def run(args) -> int:
             # card) or land just outside it as a near-miss. Either way, a blob
             # enclosing many photo windows can't be one card, so overrule it. Only
             # the high side is evidence: a low count proves nothing (count_windows).
+            # Two thresholds, not one: overruling a *confident* card fit needs
+            # more evidence than overruling a near-miss, because the two mistakes
+            # cost different things (see CARD_WINDOWS). A real card whose picture
+            # is bright enough to segment as paper leaves specks rather than one
+            # window and can reach 7 of them.
             if single or near_miss:
                 wins = count_windows(path)
                 if wins is not None:
                     r.stats["windows"] = wins
-                    if wins >= args.multi_windows:
+                    if wins >= (args.card_windows if single else args.multi_windows):
                         single = near_miss = False
             if single:
                 r.stats.update(aspect=round(det.aspect, 3), fill=round(det.fill, 3))
@@ -1686,7 +1703,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "(default: skip them and reuse their last result -- the expensive "
                         "part is the full-resolution colour pass, not detection)")
     p.add_argument("--aspect-lo", type=float, default=1.53, help="reject fits below this")
-    p.add_argument("--aspect-hi", type=float, default=1.65, help="reject fits above this")
+    p.add_argument("--aspect-hi", type=float, default=1.64, help="reject fits above this")
     p.add_argument("--min-fill", type=float, default=0.93,
                    help="reject blobs less rectangular than this")
     p.add_argument("--min-solidity", type=float, default=0.97,
@@ -1696,7 +1713,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--multi-windows", type=int, default=7,
                    help="a near-miss blob enclosing at least this many photo "
                         "windows is treated as several merged prints, not a "
-                        "suspect single card (worst genuine single measured 6)")
+                        "suspect single card (no genuine single is ever a "
+                        "near-miss, so this side is free)")
+    p.add_argument("--card-windows", type=int, default=CARD_WINDOWS,
+                   help="windows needed to overrule a blob that passed the "
+                        "*confident* single-card test; higher than "
+                        "--multi-windows on purpose (see CARD_WINDOWS)")
     p.add_argument("--min-border-ratio", type=float, default=1.6,
                    help="flag orientation when the two end borders look this alike "
                         "(a real instax mini measures ~2.1)")
