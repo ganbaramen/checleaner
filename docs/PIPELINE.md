@@ -20,6 +20,34 @@ clothing inside the photo, which is bright but busy; flat paper border is the on
 large smooth bright region. The unclipped test matters because a blown highlight
 otherwise drags the estimate down and under-corrects.
 
+**Confined to the paper.** The mask is then intersected with the detector's own
+blob mask (`paper_mask()`), falling back to the frame-wide reading if that leaves
+fewer than 800 pixels or detection found nothing.
+
+This matters because "brightest smooth region" only means "the paper border" as
+long as the *background is darker than the border* — which is a property of the
+walnut desk, not of the pipeline. Shoot the same prints on a pale table and the
+table becomes the white reference: the whole photo then gets balanced so the
+furniture is 238.8, and the prints go wherever that leaves them.
+
+The confinement is free on everything already processed. Measured over all 140
+photos in the library it produced an **identical** white on 137 of them and moved
+the correction's gain by 0.000% at the median, 0.000% at p90 — the walnut simply
+never competes. The three it changes are the backs batch, dark cards on a pale
+desk, where the frame reads white as (137, 161, 187) against the paper's neutral
+(145, 140, 132): a 116% gain error that pushes every print warm.
+
+The limit is the detector, not the anchor. The paper mask is itself
+`bright AND near-neutral`, so a genuinely white background could segment *as*
+paper and buy nothing. It held on every pale surface in the library — a grey
+table stayed out of the mask — but a white tablecloth is the case that would
+break it.
+
+**Black is deliberately not confined.** On this desk the darkest 0.5% *is* desk
+shadow, and that is baked into every batch calibrated to 2.2; confining it moves
+8 files by 2–27%. It also isn't at risk: a background bright enough to break
+white leaves the print's own content as the darkest thing anyway.
+
 **Black — the darkest content.** Mean of the pixels at or below the 0.5th
 percentile of luminance. Content dependent (dark hair vs. deep shadow vs. the
 film's own black), which is why the spread on the black point is always
@@ -70,10 +98,46 @@ gamma = log(target_u) / log(u), damped 50%, clamped to [0.86, 1.16]
 Damped and clamped because the desk matters less than the prints, and because the
 desk mask leaks skin tones. Disable with `--desk-strength 0`.
 
+**Backgrounds that aren't this batch's desk opt out.** Not every background is
+the desk. Pale wood and a grey table are warm and smooth enough to pass the desk
+test, and a photo whose prints fill the frame has no desk at all — what it
+reports is skin and clothing leaking through the mask. Matched anyway, every one
+of them gets dragged toward walnut, and since the gamma is applied to the *whole
+frame* it is the prints' midtones that pay for it.
+
+The test is the clamp that was already there: compute the damped curve unclamped
+(`desk_gamma(..., clamp=None)`), and if it falls outside [0.86, 1.16] on any
+channel, skip desk matching for that file entirely and leave it out of the target
+median. A background the damping cannot reach is not this batch's desk, so there
+is nothing sensible to pull it toward, and applying the largest correction the
+clamp allows is the worst available answer rather than the safest.
+
+Reusing the clamp rather than adding a brightness threshold keeps the rule
+**relative to the batch** and free of a second number to calibrate — shoot
+everything on a new surface and the median simply follows it. A ratio-of-median
+rule was tried first and is strictly worse: at 2× it missed two of the files it
+needed to catch, and any cut fine enough to catch them had to be picked out of a
+continuum by hand.
+
+Over `chekis/main` this is 6 files of 105, and nothing else comes close — two
+pale surfaces, one shot held in the hand, and three frames with no visible desk,
+all pinned at 1.16 on at least one channel against 0.94–0.99 for every genuine
+desk photo. The target barely moves either way ([60.9, 41.7, 29.6] against
+[60.6, 41.5, 29.3]); the point is to stop correcting *those files*, not to
+protect the median. One pass, not a loop, for the same reason.
+
+Recorded in `report.csv` as `desk_match` (`matched` / `foreign` / blank when no
+desk was visible), and **not** as a flag: skipping the match makes the output
+more faithful, not less, so there is nothing for a human to check and no reason
+to route the file to `review/`. `--match-foreign-desks` restores the old
+behaviour.
+
 **What this cannot fix:** the desk's variation is mostly *lighting*, not colour
 cast. Across a batch it typically halves the spread and no more. Two surfaces that
 are genuinely different wood will never match — see the pine vs walnut case in
-`docs/HISTORY.md`.
+`docs/HISTORY.md`. A whole shoot on a different surface is best given its own
+folder, since the target is solved per run: `sova_song_chekis` settles on
+[78, 61, 48] against `main`'s [56, 38, 26], and each is right for its own photos.
 
 ## 3. Detect the print
 

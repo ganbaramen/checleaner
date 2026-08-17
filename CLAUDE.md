@@ -120,10 +120,25 @@ errors loudly. There is still no *assertion* harness — see Next steps.
   per-folder. Every batch since the first is calibrated to them, so changing them
   silently de-matches the entire library. Both implementations must use the same
   numbers.
+- **The white anchor is measured on the prints' own paper**, not the whole frame
+  (`measure(..., paper=)`, `docs/PIPELINE.md` § 1). It is what makes the balance
+  independent of what the prints are lying on — frame-wide, a background brighter
+  than the paper border silently becomes the white reference. Confirmed a no-op
+  on the calibrated library (identical white on 137 of 140 files) precisely
+  because the walnut is dark; do not assume the next background will be. **Black
+  stays frame-wide** — on this desk the darkest 0.5% is desk shadow and the 2.2
+  calibration depends on it.
 - **All colour maths happens in linear light.** Gamma-space gain skews midtones.
 - **instax mini is 54 × 86 mm** → aspect 1.5926, output 1800 × 2867.
 - **Desk matching is secondary and damped** (strength 0.5, gamma clamped to
-  [0.86, 1.16]). It must never be allowed to drag the prints' colour around.
+  `DESK_CLAMP` = [0.86, 1.16]). It must never be allowed to drag the prints'
+  colour around. The clamp does double duty: a photo whose background the damped
+  curve can't reach without being clipped is taken to be on a *different
+  surface*, and is dropped from both the target median and the correction rather
+  than given the largest gamma allowed (`desk_match=foreign` in `report.csv`, 6
+  of 105 files in `chekis/main`). Keep that test relative to the batch — never
+  hardcode what walnut looks like, or a permanent change of desk needs a
+  recalibration instead of just working.
 - **Scope is fronts.** Backs were handled once as an exception and are documented
   in `docs/PIPELINE.md`; the current code does not support them.
 - **Multi-print reorientation is conservative by design.** `content_rotation()`

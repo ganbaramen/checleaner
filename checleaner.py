@@ -93,6 +93,15 @@ SHEEN_MIN_AREA = 0.002
 # How much of the blob's bounding box must survive the sheen test for its answer
 # to be believed at all. See _sheen_free_bbox.
 SHEEN_KEEP_MIN = 0.40
+# How far the damped desk gamma may travel before it is cut off. This does
+# double duty: as the backstop it always was, and as the test for whether desk
+# matching should run at all. A background the damping cannot reach without
+# being clamped is not this batch's desk, and pulling it toward one is
+# meaningless -- so a file that would hit the clamp is left unmatched instead
+# (see run()). Reusing the clamp rather than adding a brightness threshold keeps
+# the rule relative to the batch and free of a second number to calibrate: shoot
+# everything on a new surface and the median simply follows it.
+DESK_CLAMP = (0.86, 1.16)
 
 
 # ---------------------------------------------------------------- colour space
@@ -129,13 +138,32 @@ class Measurement:
     desk_px: int
 
 
-def measure(rgb: np.ndarray, min_desk_px: int = 40_000) -> Measurement:
+def measure(rgb: np.ndarray, min_desk_px: int = 40_000,
+            paper: np.ndarray | None = None) -> Measurement:
     """Find the three anchors in a downscaled frame.
 
     White comes from the *smooth* bright pixels, not simply the brightest: a
     variance filter separates flat paper border from bright busy content like a
     white blouse. Clipped pixels are excluded so a blown highlight can't drag
     the estimate down.
+
+    `paper` (the detector's own blob mask, at this frame's scale) confines the
+    white anchor to the prints. Frame-wide, "brightest smooth pixels" only means
+    "the paper border" because the desk is darker than the border -- photograph
+    the same prints on a pale table and the *table* becomes the white reference,
+    and the whole photo gets balanced so the furniture is 238.8. Measured over
+    the library this confinement is a no-op (identical white on 137 of 140
+    files, since the walnut never competes), which is the point: it costs the
+    calibrated batches nothing and removes the dependence on background
+    brightness. Where it does bite -- the backs batch, dark cards on a pale desk
+    -- the frame reads white as (137,161,187) against the paper's (145,140,132),
+    a 116 % gain error that pushes every print warm.
+
+    Only white is confined. Black stays frame-wide: on this desk the darkest
+    0.5 % *is* desk shadow, and that is baked into the calibration -- confining
+    it moves 8 files by 2-27 %. It is also not at risk, since a background
+    bright enough to break white leaves the print's own content as the darkest
+    thing anyway.
     """
     lum = rgb.mean(axis=2)
     mean = uniform_filter(lum, 9)
@@ -149,6 +177,13 @@ def measure(rgb: np.ndarray, min_desk_px: int = 40_000) -> Measurement:
     white_mask = bright & smooth & unclipped
     if white_mask.sum() < 800:                      # tiny border: relax smoothness
         white_mask = bright & unclipped
+    if paper is not None:
+        confined = white_mask & paper
+        # Fall back rather than trust a sliver: if the detector found only a
+        # scrap of paper, a median over it is noisier than the frame-wide read
+        # the whole library was calibrated with.
+        if confined.sum() >= 800:
+            white_mask = confined
     clipped = float((~unclipped)[bright].mean()) if bright.any() else 0.0
 
     # <=, not <: a photo with a large near-black region (a dark print background,
@@ -175,11 +210,14 @@ def measure(rgb: np.ndarray, min_desk_px: int = 40_000) -> Measurement:
     )
 
 
-def solve_levels(rgb: np.ndarray, m: Measurement, white_t, black_t, iters=6):
+def solve_levels(rgb: np.ndarray, m: Measurement, white_t, black_t, iters=6,
+                 paper: np.ndarray | None = None):
     """Per-channel gain+offset in linear light mapping white->white_t, black->black_t.
 
     Applying the transform moves the pixels the anchors were measured from, so a
-    couple of re-measure passes are needed to actually land on target.
+    couple of re-measure passes are needed to actually land on target. `paper`
+    must be the same mask `m` was measured with, or the loop chases a target
+    measured somewhere else and never converges.
     """
     W, B = white_t.copy(), black_t.copy()
     gain = off = None
@@ -187,7 +225,7 @@ def solve_levels(rgb: np.ndarray, m: Measurement, white_t, black_t, iters=6):
         gain = (W - B) / (m.white - m.black)
         off = B - gain * m.black
         corrected = to_srgb(soft_shoulder(np.clip(to_linear(rgb) * gain + off, 0, None)))
-        got = measure(corrected)
+        got = measure(corrected, paper=paper)
         err_w, err_b = white_t / got.white, black_t - got.black
         if np.max(np.abs(err_w - 1)) < 0.004 and np.max(np.abs(err_b)) < 0.0004:
             break
@@ -196,16 +234,20 @@ def solve_levels(rgb: np.ndarray, m: Measurement, white_t, black_t, iters=6):
     return gain, off
 
 
-def desk_gamma(desk_lin, target_u, white_t, black_t, strength, clamp=(0.86, 1.16)):
+def desk_gamma(desk_lin, target_u, white_t, black_t, strength, clamp=DESK_CLAMP):
     """Per-channel power curve pulling the desk toward the folder's median tone.
 
     Uses a gamma rather than a second gain because gamma fixes both endpoints:
     the white and black we just set stay exactly where they are. Damped by
     `strength` and clamped, because the desk matters less than the prints and a
     hard match would drag skin tones with it.
+
+    `clamp=None` returns the raw curve, which is how run() asks "would this file
+    hit the clamp?" without having to duplicate the arithmetic.
     """
     u = np.clip((desk_lin - black_t) / (white_t - black_t), 1e-4, 0.999)
-    return np.clip(1 + (np.log(target_u) / np.log(u) - 1) * strength, *clamp)
+    gamma = 1 + (np.log(target_u) / np.log(u) - 1) * strength
+    return gamma if clamp is None else np.clip(gamma, *clamp)
 
 
 def apply(rgb8: np.ndarray, gain, off, gamma, white_t, black_t) -> np.ndarray:
@@ -269,6 +311,26 @@ def _segment_prints(path: str, size: int = 1100):
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     big = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] > 0.03 * H * W]
     return dict(labels=labels, stats=stats, big=big, sc=sc, raw=raw, edge=edge)
+
+
+def paper_mask(path: str, shape) -> np.ndarray | None:
+    """The detector's print blobs as a boolean mask at `shape`, or None.
+
+    Bridges the two scales the pipeline works at: detection runs on its own
+    1100-px frame, the colour pass on a 1400-px thumbnail. Nearest-neighbour on
+    the way over, since this is a label mask and an interpolated edge would be a
+    half-paper pixel that is neither.
+
+    None when there is nothing confident to confine to -- no segmentation, or no
+    blob big enough to be a print -- so `measure` keeps its frame-wide reading
+    rather than confining the anchor to noise.
+    """
+    seg = _segment_prints(path)
+    if seg is None or not seg["big"]:
+        return None
+    big = np.isin(seg["labels"], seg["big"]).astype(np.uint8)
+    h, w = shape
+    return cv2.resize(big, (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
 
 
 def _sheen_free_bbox(seg, idx: int):
@@ -1227,7 +1289,9 @@ def run(args) -> int:
               f"({len(cached)} unchanged, reusing prior measurements)", flush=True)
     else:
         print(f"measuring {len(files)} images", flush=True)
-    solved, results, desks = {}, {}, []
+    # desks is keyed by name, not a bare list: the foreign-background check
+    # below has to say *which* files to leave out, not just how many.
+    solved, results, desks = {}, {}, {}
     for name in files:
         r = Result(name)
         if name in cached:
@@ -1237,21 +1301,22 @@ def run(args) -> int:
                             desk=desk.tolist() if desk is not None else None)
             results[name] = r
             if desk is not None:
-                desks.append(desk)
+                desks[name] = desk
             continue
 
         path = os.path.join(src, name)
         thumb = Image.open(path)
         thumb.thumbnail((1400, 1400))
         rgb = np.asarray(thumb.convert("RGB")).astype(np.float32)
-        m = measure(rgb)
-        gain, off = solve_levels(rgb, m, white_t, black_t)
+        paper = paper_mask(path, rgb.shape[:2])
+        m = measure(rgb, paper=paper)
+        gain, off = solve_levels(rgb, m, white_t, black_t, paper=paper)
 
         corrected = to_srgb(soft_shoulder(np.clip(to_linear(rgb) * gain + off, 0, None)))
-        after = measure(corrected)
+        after = measure(corrected, paper=paper)
         solved[name] = (gain, off, after.desk)
         if after.desk is not None:
-            desks.append(after.desk)
+            desks[name] = after.desk
 
         r.stats = dict(
             white_before=np.round(to_srgb(m.white), 1).tolist(),
@@ -1267,12 +1332,54 @@ def run(args) -> int:
         results[name] = r
 
     # -- folder-wide desk target -------------------------------------------
-    target_u = None
+    # Not every background is this batch's desk. Pale wood and a grey table are
+    # warm and smooth enough to pass the desk test, and a photo whose prints fill
+    # the frame has no desk at all -- what it reports is skin and clothing
+    # leaking in. Matched anyway, all of them get dragged toward walnut, and
+    # since `apply` raises the *whole* frame to that power it is the prints'
+    # midtones that pay for it.
+    #
+    # The test for "this isn't the desk" is the clamp that was already there: if
+    # the damped curve can't reach the target without being cut off, there is
+    # nothing sensible to match, so skip the gamma entirely rather than apply the
+    # largest one allowed. Over chekis/main that is 6 files of 105 and no others
+    # come close -- the two pale surfaces, the hand-held shot, and three frames
+    # with no visible desk -- against 0.94-0.99 for every genuine desk photo.
+    #
+    # One pass, not a loop: the target is a median, so dropping a handful of
+    # outliers barely moves it ([60.9,41.7,29.6] -> [60.6,41.7,29.3]), and the
+    # point is to stop correcting *those files*, not to protect the median.
+    target_u, foreign = None, set()
     if desks and args.desk_strength > 0:
-        target_u = np.median([np.clip((d - black_t) / (white_t - black_t), 1e-4, 0.999)
-                              for d in desks], axis=0)
+        def solve(ds):
+            return np.median([np.clip((d - black_t) / (white_t - black_t), 1e-4, 0.999)
+                              for d in ds], axis=0)
+
+        target_u = solve(desks.values())
+        if not args.match_foreign_desks:
+            for name, d in desks.items():
+                raw = desk_gamma(d, target_u, white_t, black_t,
+                                 args.desk_strength, clamp=None)
+                if np.any(raw < DESK_CLAMP[0]) or np.any(raw > DESK_CLAMP[1]):
+                    foreign.add(name)
+            core = [d for n, d in desks.items() if n not in foreign]
+            # Everything out of reach of everything else means the batch has no
+            # common surface to match to; then none of them is the odd one out.
+            if core:
+                target_u = solve(core)
+            else:
+                foreign = set()
         print(f"desk target {np.round(to_srgb(black_t + target_u*(white_t-black_t)),1).tolist()}"
-              f" from {len(desks)} images", flush=True)
+              f" from {len(desks) - len(foreign)} images", flush=True)
+        for name in sorted(foreign):
+            print(f"  {name:<34} background isn't this batch's desk "
+                  f"(reads {to_srgb(desks[name]).mean():.0f} against the batch's "
+                  f"{np.median([to_srgb(d).mean() for d in desks.values()]):.0f})"
+                  " - desk matching skipped", flush=True)
+    for name in files:
+        if name in results:
+            results[name].stats["desk_match"] = (
+                "foreign" if name in foreign else "matched" if name in desks else "")
 
     if args.dry_run:
         for name in files:
@@ -1310,7 +1417,8 @@ def run(args) -> int:
         path = os.path.join(src, name)
         gain, off, desk = solved[name]
         gamma = (desk_gamma(desk, target_u, white_t, black_t, args.desk_strength)
-                 if (desk is not None and target_u is not None) else None)
+                 if (desk is not None and target_u is not None
+                     and name not in foreign) else None)
 
         rgb8 = np.asarray(Image.open(path).convert("RGB"))
         img = cv2.cvtColor(apply(rgb8, gain, off, gamma, white_t, black_t), cv2.COLOR_RGB2BGR)
@@ -1457,16 +1565,22 @@ def _write_report(path, files, results):
         # desk is here for reuse, not just record-keeping: a rerun reads it back
         # (see _cached_measurement) to skip re-measuring an unchanged file, so
         # it must stay in lockstep with white_before/black_before/gain/clipped_pct
+        # desk_match records whether desk matching actually ran: "matched",
+        # "foreign" (background isn't this batch's desk, so no gamma), or blank
+        # (no desk visible). It is deliberately *not* a flag -- skipping the
+        # match makes the output more faithful, not less, so there is nothing
+        # for a human to check and no reason to route the file to review/.
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
-                     "clipped_pct", "desk", "aspect", "fill", "border_ratio",
-                     "align_tilt", "align_n", "align_crop", "reorient",
-                     "windows", "flags"])
+                     "clipped_pct", "desk", "desk_match", "aspect", "fill",
+                     "border_ratio", "align_tilt", "align_n", "align_crop",
+                     "reorient", "windows", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
             dest = "review" if r.flags else "balanced"
             wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
-                         s.get("gain"), s.get("clipped_pct"), s.get("desk"), s.get("aspect"),
+                         s.get("gain"), s.get("clipped_pct"), s.get("desk"),
+                         s.get("desk_match", ""), s.get("aspect"),
                          s.get("fill"), s.get("border_ratio"),
                          s.get("align_tilt"), s.get("align_n"), s.get("align_crop"),
                          s.get("reorient"), s.get("windows"),
@@ -1557,6 +1671,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--black", type=float, default=2.2, help="target black point, 0-255")
     p.add_argument("--desk-strength", type=float, default=0.5,
                    help="how hard to match the desk, 0 disables")
+    p.add_argument("--match-foreign-desks", action="store_true",
+                   help="desk-match every photo, even ones whose background the "
+                        "damping can't reach (restores the pre-opt-out behaviour)")
     p.add_argument("--width", type=int, default=1800, help="output width for crops")
     p.add_argument("--quality", type=int, default=96, help="JPEG quality")
     p.add_argument("--no-crop", action="store_true", help="colour-balance only")

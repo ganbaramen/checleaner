@@ -30,6 +30,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 import io
 import contextlib
+import csv
 
 import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
@@ -102,6 +103,48 @@ def make_single_with_glare(frame_w=1200, seed=0):
     return img.astype(np.uint8)
 
 
+# A pale surface with a cool cast -- the shape of the failure the backs batch
+# hit, where the frame read white as (137,161,187) against the paper's neutral
+# (145,140,132) and every print came out pushed warm.
+PALE_DESK = np.array([206, 214, 228], np.float32)
+
+
+def make_card_on_pale_desk(frame_w=1200, seed=0):
+    """A mostly-dark card on a pale, cool-cast surface: the case where the
+    background, not the print, wins the 'brightest smooth pixels' test.
+
+    Returns (frame, paper_mask). The mask comes from the known card rectangle
+    rather than the detector, so this pins measure()'s contract and not the
+    segmentation's.
+    """
+    frame_h = int(frame_w * 1.4)
+    img = np.clip(PALE_DESK + _noise((frame_h, frame_w, 3), 2, seed), 0, 255)
+
+    card_h = int(frame_h * 0.34)                  # small: little white to find
+    card_w = int(card_h / ASPECT)
+    y0, x0 = (frame_h - card_h) // 2, (frame_w - card_w) // 2
+    paper = np.zeros((frame_h, frame_w), bool)
+    paper[y0:y0+card_h, x0:x0+card_w] = True
+    img[paper] = np.clip(BORDER + _noise((int(paper.sum()), 3), 2, seed+1), 0, 255)
+
+    # a dark photo window covering most of the card, leaving a thin border
+    mx, my = int(card_w * 0.07), int(card_h * 0.06)
+    img[y0+my:y0+card_h-my, x0+mx:x0+card_w-mx] = np.clip(
+        np.array([28, 30, 34]) + _noise((card_h-2*my, card_w-2*mx, 3), 2, seed+2), 0, 255)
+    return img.astype(np.uint8), paper
+
+
+def make_single_on_foreign_desk(frame_w=1200, seed=0):
+    """A lone card on a pale but still *warm* surface -- light wood rather than
+    the walnut. Warm and smooth, so it passes the desk test and gets a desk
+    reading; far too bright for the damped gamma to reach the batch's target."""
+    img = make_single(frame_w, seed=seed).astype(np.float32)
+    desk = np.all(np.abs(img - DESK) < 12, axis=2)
+    img[desk] = np.clip(np.array([190, 150, 110])
+                        + _noise((int(desk.sum()), 3), 2, seed + 7), 0, 255)
+    return img.astype(np.uint8)
+
+
 def make_row(frame_w=1400, cols=2, seed=0):
     """Several prints touching in a row -- they merge into one blob far too wide
     to be a single card. The everyday multi-print shot."""
@@ -168,6 +211,83 @@ def test_colour_targets_hit_238_and_2():
     white, black = to_srgb(after.white), to_srgb(after.black)
     assert np.all(np.abs(white - 238.8) < 0.8), f"white landed {np.round(white,2)}, want 238.8"
     assert np.all(np.abs(black - 2.2) < 0.8), f"black landed {np.round(black,3)}, want 2.2"
+
+
+def test_paper_confinement_leaves_the_normal_desk_alone():
+    """The justification for confining the white anchor: on this desk it changes
+    nothing. Measured over the real library it was identical on 137 of 140 files
+    and moved the gain by 0.000% at the median, which is what lets it ship
+    without de-matching every batch already processed against 238.8/2.2."""
+    rgb = make_single().astype(np.float32)
+    h, w = rgb.shape[:2]
+    card_h = int(h * 0.62)
+    card_w = int(card_h / ASPECT)
+    y0, x0 = (h - card_h) // 2, (w - card_w) // 2
+    paper = np.zeros((h, w), bool)
+    paper[y0:y0+card_h, x0:x0+card_w] = True
+
+    frame = to_srgb(measure(rgb).white)
+    confined = to_srgb(measure(rgb, paper=paper).white)
+    assert np.all(np.abs(frame - confined) < 1.0), \
+        f"confinement moved white on a normal desk: {np.round(frame,2)} -> {np.round(confined,2)}"
+
+
+def test_white_anchor_comes_from_the_paper_not_the_background():
+    """A dark card on a pale, cool surface: frame-wide, the *table* is the
+    brightest smooth thing, so it becomes the white reference and every channel
+    gain skews to neutralise the table's cast -- which pushes the print the
+    opposite way. Confined to the paper, white is the border again."""
+    rgb, paper = make_card_on_pale_desk()
+    rgb = rgb.astype(np.float32)
+
+    frame = to_srgb(measure(rgb).white)
+    confined = to_srgb(measure(rgb, paper=paper).white)
+    assert frame[0] - frame[2] < -10, \
+        f"fixture isn't reproducing the cast: frame white {np.round(frame,1)}"
+    assert abs(confined[0] - confined[2]) < 3, \
+        f"paper-confined white should be neutral, got {np.round(confined,1)}"
+    assert np.all(np.abs(confined - BORDER) < 3), \
+        f"paper-confined white {np.round(confined,1)} should be the border {BORDER}"
+
+    white_t = np.full(3, float(to_linear(np.array([238.8]))[0]))
+    black_t = np.full(3, float(to_linear(np.array([2.2]))[0]))
+    g_frame, _ = solve_levels(rgb, measure(rgb), white_t, black_t)
+    g_paper, _ = solve_levels(rgb, measure(rgb, paper=paper), white_t, black_t, paper=paper)
+    # the frame-wide solve has to stretch red much harder than blue to undo the
+    # table; the confined one barely separates the channels at all
+    assert g_frame.max() / g_frame.min() > 1.15, \
+        f"expected a skewed frame-wide gain, got {np.round(g_frame,3)}"
+    assert g_paper.max() / g_paper.min() < 1.05, \
+        f"expected a near-neutral confined gain, got {np.round(g_paper,3)}"
+
+
+def test_foreign_background_is_left_out_of_desk_matching():
+    """A photo on a different surface gets no desk gamma at all, rather than the
+    largest one the clamp allows. The clamp *is* the test: a background the
+    damped curve can't reach isn't this batch's desk, so there is nothing
+    sensible to pull it toward."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for i in range(3):
+            cv2.imwrite(os.path.join(tmp, f"desk_{i}.jpg"),
+                        cv2.cvtColor(make_single(seed=i * 10), cv2.COLOR_RGB2BGR))
+        cv2.imwrite(os.path.join(tmp, "foreign.jpg"),
+                    cv2.cvtColor(make_single_on_foreign_desk(seed=3), cv2.COLOR_RGB2BGR))
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert run(build_parser().parse_args([tmp])) == 0
+        out = buf.getvalue()
+        assert "foreign.jpg" in out and "background isn't this batch's desk" in out, out
+        assert "desk target" in out and "from 3 images" in out, \
+            f"the foreign desk should be out of the target too:\n{out}"
+
+        rows = {r["file"]: r for r in csv.DictReader(open(os.path.join(tmp, "report.csv")))}
+        assert rows["foreign.jpg"]["desk_match"] == "foreign", rows["foreign.jpg"]
+        assert rows["desk_0.jpg"]["desk_match"] == "matched", rows["desk_0.jpg"]
+        # skipping the match is not a defect in the photo: nothing to review
+        assert rows["foreign.jpg"]["dest"] == rows["desk_0.jpg"]["dest"] or \
+            "desk" not in rows["foreign.jpg"]["flags"], \
+            "opting out of desk matching must not route a file to review/"
 
 
 def test_single_card_detects_at_true_aspect():

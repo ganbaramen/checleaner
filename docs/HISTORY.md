@@ -871,6 +871,75 @@ for this reason -- 154257343 and 055435791 as reported, plus 155935560 and
 073449276 -- taking declines from 5 to 8 and the worst margin asymmetry from
 464 px to 140.
 
+## 2026-08-17 — not every background is the desk
+
+Prompted by a plain question: the walnut desk won't always be the background, so
+what keeps the prints' colour consistent when it changes? Five photos were
+already like that. Measuring all 140 files in the library found **two separate
+mechanisms, only one of which was actually misbehaving.**
+
+### The white anchor was fine — by luck, not design
+
+`measure()` took white from the brightest smooth pixels of the *whole frame*.
+That only finds the paper border because the walnut is darker than paper.
+Confining the mask to the detector's blobs changed the result on **3 of 140**
+files; on the other 137 the white was identical and the gain moved 0.000% at
+both median and p90. So the anchor was never wrong on any fronts photo,
+including all five that were asked about.
+
+The three it does change are the backs batch — dark cards on a pale desk, where
+the background wins outright:
+
+| file | white from frame | from paper | gain error |
+|---|---|---|---|
+| `20260728_035448131` | 137, 161, 187 (blue) | 145, 140, 132 (neutral) | **116%** |
+| `20260728_035633320` | 143, 171, 195 | 146, 154, 151 | 77% |
+| `20260728_035651788` | 134, 163, 164 | 135, 163, 144 | 34% |
+
+Shipped anyway, precisely *because* it is a no-op today: it costs the calibrated
+library nothing and removes the dependence on background brightness before a
+pale surface makes it a real problem. Black was left frame-wide — confining it
+moves 8 files by 2–27%, since on this desk the darkest 0.5% is desk shadow and
+the 2.2 calibration is built on that.
+
+### Desk matching was the actual fault
+
+The desk test is walnut-shaped (warm, mid-dark, smooth), and a pale surface still
+passes it. Those files were being pinned at the gamma clamp — 1.16 on every
+channel against 0.94–0.99 for a genuine desk photo — and since the gamma is
+applied to the whole frame, the prints' midtones paid for it.
+
+The fix reuses the clamp as the test rather than adding a threshold: if the
+damped curve can't reach the target without being clipped, that background isn't
+this batch's desk, so skip the match instead of applying the largest correction
+allowed. On `chekis/main` that is exactly 6 of 105, with nothing else close:
+
+| file | desk (sRGB) | vs batch median 44 | unclamped gamma |
+|---|---|---|---|
+| `20260211_053747452` | 200, 167, 132 | 3.8× | 1.16 on all 3 |
+| `20260815_224341680` | 218, 142, 89 | 3.4× | 1.16 on all 3 |
+| `20260815_222540256` | 205, 131, 81 | 3.2× | 1.16 on all 3 |
+| `20260630_140740030` | 203, 77, 54 | 2.5× | 1.16 on all 3 |
+| `20260803_034833604` | — | 1.9× | 1.16 on 1 |
+| `20260526_055435791` | 124, 78, 36 | 1.8× | 1.16 on 2 |
+
+Two of those are genuinely different surfaces (pale pine, a grey table), one is
+held in the hand, and **three have no visible desk at all** — the prints fill the
+frame, so what the mask read was skin and clothing leaking in. That last group
+was not anticipated; the clamp caught it for free, which is the argument for the
+clamp over a brightness ratio. A 2× median-luminance rule was implemented first
+and rejected: it missed `055435791` and `034833604`, and the luminances form a
+continuum (166, 150, 139, 111, 81, 79, 57, 56, …) with no cut that separates
+them cleanly.
+
+Target moved [60.9, 41.7, 29.6] → [60.6, 41.5, 29.3], i.e. barely — medians are
+robust and the outliers were never the problem. The point is not correcting
+those six.
+
+Recorded as a new `report.csv` column, `desk_match`, and deliberately not as a
+flag: skipping the match makes the output more faithful, so there is nothing to
+review.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
