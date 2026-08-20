@@ -172,9 +172,17 @@ directly.
   Python-only** — `checleaner.html` keeps one threshold (6) because its
   approximated solidity can't see a staggered row's notches, so the count is the
   only thing stopping one being cropped as a card. Don't "finish the port".
+- **Frame tilt comes from the prints' own edges**, not from a rectangle fitted
+  to the blob and not from the photo windows (`_edge_dirs`, `docs/PIPELINE.md`
+  § 6). Both alternatives fail on real photos in this library and fail
+  *silently*: a staggered pile's fitted rectangle sits 33° off cards that are
+  level, and a signature's ink loops make small square holes that read as
+  perfectly level windows and outvote everything else — 81 of 140 files had
+  their tilt decided that way. Both remain as fallbacks, behind
+  `TILT_COHERENCE`, for frames whose edges genuinely disagree.
 - **The detection thresholds are calibrated against the real library, not
   guessed** — `PRINT_FILL`, `CARD_OPP_MIN`/`CARD_AREA_MIN`/`CARD_SOLIDITY_MIN`,
-  `MULTI_WINDOWS`, `CARD_WINDOWS`, `PAPER_HALO`, and `--aspect-hi` (1.64, with
+  `MULTI_WINDOWS`, `CARD_WINDOWS`, `PAPER_HALO`, `TILT_COHERENCE`, and `--aspect-hi` (1.64, with
   real singles topping out at 1.631). Each sits in a measured gap between real cards
   and merged piles (see `docs/PIPELINE.md` § 3 and the 2026-08-16 entries in
   `docs/HISTORY.md`), and several are only a few points wide. Before moving one,
@@ -190,6 +198,13 @@ directly.
 - Verify changes by measuring, not by eyeballing thumbnails. The measurement
   snippet in `docs/PIPELINE.md` reproduces the numbers quoted in `docs/HISTORY.md`.
 - When a crop looks wrong, check for mirroring first — see the winding gotcha.
+- **Name a photo by the time part of its filename only** — `012024586`, not
+  `PXL_YYYYMMDD_012024586.MP.jpg` — in comments, docs and commit messages. The
+  time is unique across the whole library, so the date and extension are twenty
+  characters of noise in a sentence already dense with numbers. Add the folder
+  (`rancheki/053951339`) when the batch matters. Tests resolve these through
+  `_photo()` in `tests/test_pipeline.py`; runnable example commands keep a
+  `<file>.jpg` placeholder rather than a real dated path.
 
 ## Next steps, roughly in order of value
 
@@ -217,13 +232,19 @@ directly.
    face detector (e.g. onnxruntime-web + the same YuNet model), which also
    means solving how a `file://` page loads WASM offline (the hosted build has
    a service worker to lean on; see Hosting).
-3. **Give `checleaner.html` a real external-contour area**, so its `solidity`
-   stops reading a staggered row as a clean card — `20260221_153435918` measures
-   0.995/0.998 there against Python's 0.863/0.793. Until then the app's window
-   count is the only thing keeping such a row out of the single-card path, which
-   is why `MULTI_WINDOWS` can't be split the way Python's now is, and why two
-   genuine singles come out levelled rather than cropped (`docs/PIPELINE.md`
-   § 3). Fixing this unblocks that split and those two files together.
+3. **Give `checleaner.html` a contour tracer.** It has none, and two separate
+   gaps come out of that. Its `solidity` is approximated (`closedArea /
+   hullArea`), so it reads a staggered row as a clean card —
+   `153435918` measures 0.995/0.998 against Python's 0.863/0.793 —
+   which leaves the window count as the only thing keeping such a row out of
+   the single-card path, which is why `MULTI_WINDOWS` can't be split the way
+   Python's now is, and why two genuine singles come out levelled rather than
+   cropped (`docs/PIPELINE.md` § 3). And `dominantTilt()` still averages blob
+   `minAreaRect` angles, so a staggered pile levels by its staircase rather
+   than its cards, the way `checleaner.py` did before `_edge_dirs()`
+   (`docs/PIPELINE.md` § 6) — which needs an outline to walk. One tracer plus
+   a Douglas-Peucker pass fixes both; `TILT_COHERENCE` would then need its own
+   sweep, since canvas decoding isn't pixel-identical to `cv2`'s.
 4. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge

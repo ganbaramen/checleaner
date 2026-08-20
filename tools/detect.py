@@ -11,7 +11,7 @@ single/near-miss thresholds), running the whole dataset just to see the decision
 change is pure waste. This runs only that decision, on only the files you name,
 in well under a second each.
 
-    python3 tools/detect.py chekis/main/PXL_20260427_023359428.MP.jpg [...]
+    python3 tools/detect.py chekis/main/<file>.jpg [...]
     python3 tools/detect.py --crop /tmp/out chekis/main/*.jpg
 
 Per file it prints the same single / single? / multi verdict run() would reach,

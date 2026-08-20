@@ -13,7 +13,7 @@ reclassifies is to push every photo through the real page.
     python3 tools/webdetect.py --csv before.csv chekis/main/*.jpg
     # ... change a threshold in checleaner.html ...
     python3 tools/webdetect.py --csv after.csv --compare before.csv chekis/main/*.jpg
-    python3 tools/webdetect.py --save /tmp/js chekis/main/PXL_20260803_041037832.MP.jpg
+    python3 tools/webdetect.py --save /tmp/js chekis/main/<file>.jpg
 
 `--compare` is the one that matters: it prints only the files whose verdict
 moved, which is what "sweep and check what reclassifies" means for the JS half.

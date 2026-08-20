@@ -134,6 +134,9 @@ const PRINT_FILL = 0.90;
 // Breathing room around the prints in an aligned crop, taken only when there is
 // desk to spend on it.
 const CROP_MARGIN = 0.04;
+// How finely alignMulti() may ration that margin when the desk is one-sided and
+// the whole of it would only fit off-centre.
+const CROP_MARGIN_STEPS = 4;
 // How far past the blob to look for the prints' true paper extent.
 const PAPER_HALO = 0.20;
 // Least a crop's smaller margin may be as a fraction of its larger one, on the
@@ -1176,9 +1179,21 @@ function alignMulti(srcCanvas, dets) {
     // A little breathing room, but only if there's desk to spend on it, and only
     // after the shape is settled -- growing first would let a frame-filling pile
     // pick a worse-fitting aspect merely because the better one no longer fit.
-    const gw = hw * (1 + CROP_MARGIN), gh = hh * (1 + CROP_MARGIN);
-    const gat = place(gw, gh);
-    if (gat && !lopsided(gw, gh, gat[0], gat[1])) { hw = gw; hh = gh; }
+    //
+    // Take as much of it as fits *evenly*, not all of it. Growing widens the
+    // crop on both sides at once, so where the desk is one-sided the full margin
+    // only fits by sliding -- which puts every new pixel on one side, the exact
+    // lopsidedness the margin exists to avoid. One real frame has its prints
+    // 36 px from the left edge and 330 from the right, and came out 36 against
+    // 110. `lopsided` can't catch that (it is inside CROP_BALANCE) and loosening
+    // it far enough to would start refusing crops that are merely tight.
+    for (let step = CROP_MARGIN_STEPS; step >= 1; step--) {
+      const g = 1 + CROP_MARGIN * step / CROP_MARGIN_STEPS;
+      const gw = hw * g, gh = hh * g, gat = place(gw, gh);
+      if (!gat || lopsided(gw, gh, gat[0], gat[1])) continue;
+      if (Math.abs(gat[0] - mcx) > pad || Math.abs(gat[1] - mcy) > pad) continue;
+      hw = gw; hh = gh; break;                  // only fits off-centre otherwise
+    }
   } else {
     const ratio = w / h;                    // the frame's own shape -- pre-CROP_ASPECTS fallback
     hh = Math.max(bh2, bw2 / ratio); hw = hh * ratio;

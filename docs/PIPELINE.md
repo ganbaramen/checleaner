@@ -341,7 +341,7 @@ a wrongly-accepted grid costs a mangled photo), not chased further.
 **The two-threshold split above is Python-only, on purpose.** In Python a
 staggered row is thrown out by shape before the count is consulted, so raising
 the bar for confident fits costs nothing. In JS it isn't: the approximated
-solidity cannot see the notches in a staggered row. `20260221_153435918`, three
+solidity cannot see the notches in a staggered row. `153435918`, three
 prints laid unevenly, reads fill 0.863 / solidity 0.793 to Python and **0.995 /
 0.998** to the app — it sails through the JS shape gate, and the window count is
 the only thing between it and being warped into one card.
@@ -351,10 +351,10 @@ gate interleave completely:
 
 | file | aspect | fill | solidity | windows | truth |
 |---|---|---|---|---|---|
-| `20260221_153435918` | 1.576 | 0.995 | 0.998 | 6 | **multi** |
-| `20260729_033323480` | 1.579 | 0.997 | 0.999 | 7 | single |
-| `20260401_073350228` | 1.585 | 0.996 | 0.991 | 6 | single |
-| `20260811_012024586` | 1.639 | 0.994 | 0.994 | 7 | **multi** |
+| `153435918` | 1.576 | 0.995 | 0.998 | 6 | **multi** |
+| `033323480` | 1.579 | 0.997 | 0.999 | 7 | single |
+| `073350228` | 1.585 | 0.996 | 0.991 | 6 | single |
+| `012024586` | 1.639 | 0.994 | 0.994 | 7 | **multi** |
 
 No threshold on any recorded metric separates those rows, and aspect can't
 help either (the multis bracket the singles). So `MULTI_WINDOWS` stays 6 for
@@ -366,7 +366,7 @@ notches, not moving the count.
 
 Two of the 106 files in `chekis/main/` give the phone app no blob at all
 ("couldn't find a white border in this photo") where Python segments them
-fine: `PXL_20260128_053032673.MP.jpg` and `PXL_20260630_140740030.jpg`. Same
+fine: `053032673` and `140740030`. Same
 decoding difference, at the other end — the JS mask never reaches the 3 % area
 floor. Long-standing, unchanged by the § 6 port, and left alone: the app tells
 the user plainly and does nothing destructive.
@@ -460,10 +460,14 @@ A multi-print photo isn't cropped to a card shape, but it can still be
 straightened and centred: `align_multi()` in `checleaner.py`.
 
 The **levelling, best-fit crop, and margin recentre** in this section are all
-ported to `checleaner.html` (`alignMulti()` + `paperBbox()`, same tilt maths,
-`CROP_ASPECTS` list, hull-based extent, slack-capped nudge, and the lopsided
-rule), as is the glare filter on secondary blobs (`PRINT_FILL`) and the sheen
-trim of § 3 (`sheenFreeBox()`). The **content reorientation** half
+ported to `checleaner.html` (`alignMulti()` + `paperBbox()`, `CROP_ASPECTS`
+list, hull-based extent, slack-capped nudge, the lopsided rule and the
+rationed margin), as is the glare filter on secondary blobs (`PRINT_FILL`) and
+the sheen trim of § 3 (`sheenFreeBox()`). The **edge-direction tilt** is not:
+the app has no contour tracer (its solidity is approximated for the same
+reason), so `dominantTilt()` still averages blob `minAreaRect` angles and can
+be fooled by a staggered pile the way `checleaner.py` no longer is. Writing
+that tracer would fix both at once — see the next steps in `CLAUDE.md`. The **content reorientation** half
 below is desktop-only — it needs a face model the offline single-file app
 can't ship — so the phone app instead offers manual ⟲/⟳/180° rotate buttons to
 stand a levelled result upright by hand. One consequence: `checleaner.html`
@@ -475,42 +479,69 @@ in front of them, not a misclassification.
 
 **Rotation.** `detect_all_prints()` runs the same paper-frame segmentation as
 single-print detection, but keeps every large blob instead of just the biggest.
-A rectangle looks the same every 90°, so tilt is folded into [-45°, 45°) before
-combining — two prints at +44° and −44° are 2° apart, not 88°, and averaging the
-raw angles would get that wrong. The frame is rotated by the **area-weighted
-circular mean** of the tilts, so as many prints as possible land parallel to the
-frame edges.
+A rectangle looks the same every 90°, so every angle here is folded into
+[-45°, 45°) before combining — two prints at +44° and −44° are 2° apart, not 88°,
+and averaging the raw angles would get that wrong. `_circular_tilt()` does the
+folding and the averaging together, by quadrupling the angles, averaging on the
+circle and dividing back.
 
-Those tilts come from the **photo windows**, not the blob rectangles, whenever
-at least `MIN_TILT_WINDOWS` of them are rectangular enough to trust
-(`_window_tilts`). A window is a print's own picture area, so its rectangle is
-the *card's* rectangle. A merged blob's rectangle is not: on a staggered pile it
-describes the arrangement's outline, which is tilted even when every card in it
-is level — one photo's blob read −2.13° while all eight of its windows agreed on
-−0.27°, and the frame came out visibly askew. A sheen bridged onto the blob skews
-it further. Windows sit inside the cards, out of reach of both. The blob
-rectangles remain the fallback for piles whose windows are too few or too ragged
-(bright print content merges a window into the border).
+The angle it averages is the direction of the prints' **own edges**
+(`_edge_dirs`): trace each blob's outline, reduce it with `approxPolyDP` at 2 px,
+and take every straight run of at least `EDGE_MIN_LEN` (8 px) as one vote,
+weighted by **length squared**. A card's border is the most direct evidence of
+its angle there is, and it survives everything that ruins the alternatives:
 
-**Known limitation: two specks can outvote the blob.** When a print is high-key,
-its real picture area segments as paper and is rejected as ragged, while small
-dark patches survive as "windows". A rectangle a few dozen pixels across has no
-usable angle — it snaps to axis-aligned — so `MIN_TILT_WINDOWS` (2) is satisfied
-by two specks both reading −0.0°, and they beat a correct blob tilt.
-`rancheki/PXL_20260601_053951339` is the case: two windows of 2.6 k and 10 k px
-say −0.0° while the blob says +1.204°, and the crop comes out about a degree
-askew.
+- **Staggering.** A merged blob's `minAreaRect` describes the *arrangement's*
+  outline, not any card. Deal three level prints half a card apart each way and
+  that rectangle sits 32° off — a real photo in the library
+  (`073507152`) does exactly this at 33°. Every straight run of
+  the same outline is still a card border, lying level.
+- **Ink.** Every print in this collection is signed, and the stroke crosses out
+  of the photo area into the white border. That merges the window with the ink,
+  so its hole in the paper mask stops being rectangular and fails
+  `WINDOW_RECT_MIN`, while a closed loop of pen sitting *inside* the border — a
+  signature's bowl, a drawn heart — survives as a small clean hole that the
+  morphology leaves axis-aligned. Ink is inside the paper, never on its
+  silhouette, so edges don't see any of this.
+- **Sheen.** A soft desk highlight bridged onto the blob wanders rather than
+  running straight, so `approxPolyDP` breaks it into many short runs and the
+  length-squared weighting drops it. Squared, specifically: the question is which
+  direction the outline *commits* to, and one 400 px card border is better
+  evidence of that than fifty 8 px jags with the same total length.
 
-**Five ways to tell those specks from real windows were measured and all
-failed** — don't reach for them again. Closing the hole mask (the fragments
-aren't adjacent, so no radius merges them); a per-window area floor (2% moves 19
-files, several catastrophically — one staggered pile falls back to a **−33°**
-blob tilt); a minimum rectangle side (real windows go down to 42 px, these are
-45 and 95); window aspect (37% of all real windows are under 1.25, and these are
-1.17–1.24); and total window coverage of the paper (this file is 0.028, *above*
-a pile at 0.022 that must keep its windows). Every lever trades a degree of
-error here for tens of degrees elsewhere, so the tilt is left as it is: the file
-is a near-miss and already goes to `review/` for a look.
+The edge angle is used only when the runs **agree**. `_circular_tilt` returns the
+resultant length of its own mean for free — 1 when every run is parallel or
+perpendicular, near 0 when they point every which way — and `TILT_COHERENCE`
+(0.95) is the bar. Across all 140 photos that number lands either above 0.95 or
+below 0.90, never between, and the two sides behave in opposite directions:
+above it the edge angle beats what came before on 47 files and loses on 16,
+every loss in the fourth decimal of axis-alignment; below it that reverses.
+Low agreement means a card keystoned steeply enough that its four borders
+genuinely aren't two pairs of parallels any more — a real measurement of
+something that isn't a rotation — so the estimate falls through rather than
+being acted on.
+
+What it falls through to is the old order: the **photo windows** when at least
+`MIN_TILT_WINDOWS` of them are rectangular enough to trust (`_window_tilts`),
+and the blob rectangles otherwise.
+
+**Why the ink case isn't fixed by filtering windows instead.** Before the edges
+were used, `rancheki/053951339` came out about a degree askew for
+exactly the reason above: two ink loops of 2.6 k and 10 k px both reading −0.0°
+satisfied `MIN_TILT_WINDOWS`, and beat a blob that said +1.204°. **Five ways to
+tell those loops from real windows were measured and all failed** — don't reach
+for them again. Closing the hole mask (the fragments aren't adjacent, so no
+radius merges them); a per-window area floor (2% moves 19 files, several
+catastrophically — one staggered pile falls back to a **−33°** blob tilt); a
+minimum rectangle side (real windows go down to 42 px, these are 45 and 95);
+window aspect (37% of all real windows are under 1.25, and these are 1.17–1.24);
+and total window coverage of the paper (this file is 0.028, *above* a pile at
+0.022 that must keep its windows). A relative floor — drop any hole under a
+quarter of the biggest one — does isolate the loops, but it moves 81 of 140
+files and drops two below `MIN_TILT_WINDOWS` onto blob rectangles that are
+themselves wrong (that same −33°, and +13° on another). Every lever inside the
+window path trades a degree of error here for tens of degrees elsewhere, which
+is what sent the measurement outside it.
 
 **Crop.** After rotating (with the canvas expanded so nothing is clipped),
 take the union bounding box of every detected blob in the rotated frame and
@@ -558,6 +589,19 @@ the grown crop still fits: growing before choosing would let a frame-filling
 pile pick a worse-fitting shape merely because the better one no longer fit with
 margin added, and a pile with no desk to spare keeps its tight crop rather than
 being pushed into declining.
+
+It is also **rationed**, in `CROP_MARGIN_STEPS` (4) steps, and takes only the
+largest part that still places on the prints' own centre. Growing widens the
+crop on both sides at once, so where the desk is one-sided the full margin
+doesn't fit centred and `place()` slides the crop to make it fit — which puts
+every new pixel of margin on one side, the exact lopsidedness the margin exists
+to avoid. `012024586` is a row lying 36 px from the left edge of
+its frame and 330 from the right: the ungrown 4:3 crop sits dead centre on it,
+and the fully grown one came out with 36 px of desk on the left against 110 on
+the right. Half the margin fits centred and gives it an even 36 px on each side.
+The `lopsided()` rule can't catch this on its own — 36 against 110 is inside
+`CROP_BALANCE` — and loosening that far enough to catch it would start refusing
+crops that are merely tight.
 
 The crop's shape comes from `CROP_ASPECTS` (4:3, 3:4, 1:1, 16:9 — a plain
 list, extend it there). For each candidate, the tightest crop at that ratio

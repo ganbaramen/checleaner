@@ -124,7 +124,7 @@ Five were lying rotated 90° on the desk; ten needed a 180° flip, only `031909`
 already upright. `031909` and `033346` had a wedge of desk surviving on two edges
 each and were trimmed by hand.
 
-`20260630_062001471` was added later: a two-print close-up with the cards running
+`062001471` was added later: a two-print close-up with the cards running
 past the frame edge, so it cannot be cropped even in principle. Only needed ~8% on
 red — the closest to neutral of anything in the folder.
 
@@ -194,7 +194,7 @@ Multi-print photos were balanced and left whole; `align_multi()` (method in
 on the prints when it safely can, at the original photo's aspect ratio.
 Python only for now — porting to `checleaner.html` is next steps item 2.
 
-Test file: `chekis/main/PXL_20260427_023437053.MP.jpg` (two touching prints,
+Test file: `023437053` (two touching prints,
 tilted ~1.5°) — verified both by inspecting the geometry directly (target and
 achieved crop ratio agreed to 4 decimal places; top/bottom margins agreed to
 0.001px, left/right to five nines) and by eye on the actual rendered output.
@@ -272,7 +272,7 @@ User caught 6 misoriented files in `chekis/main/` across two categories.
 
 **Real bug, fixed:** `orient()`'s row profile was a *mean* across the row,
 which a strong partial-width edge inside the photo can win even though it has
-nothing to do with the border -- found on `20260427_022950306`, where the
+nothing to do with the border -- found on `022950306`, where the
 "bottom" edge it locked onto was the boundary between a subject's pale face
 and dark hair, not the paper transition. That transition was real and
 full-width, just lower-contrast than the face/hair edge at that particular
@@ -323,7 +323,7 @@ overcropped. Two distinct bugs, both real, both fixed.
 
 **`trim_desk()`'s desk-hue reference can be near-white.** It samples a ring
 around the *original photo's* outer edge and assumes that's desk. On
-`20260803_034511524` and `20260803_034606768`, the card fills nearly the
+`034511524` and `034606768`, the card fills nearly the
 whole frame, so that ring instead sampled the card's own border -- reference
 colour came back at L≈240 with chroma magnitude (`nv`) 2.0 and 2.24. A hue
 *direction* derived from an almost-neutral reference is essentially noise,
@@ -341,18 +341,18 @@ Zero regressions on the rancheki regression set (all residual-desk checks
 still pass at 0px).
 
 **A tight grid of cards can pass the single-card test.**
-`20260811_012314592` is an 11-card grid, not a single print, but the merged
+`012314592` is an 11-card grid, not a single print, but the merged
 blob's overall aspect (1.626) and fill (0.944) both happened to land inside
 the single-card acceptance window, so it got warped and cropped as if it
 were one card -- the "crop" ended up keeping nearly the entire original
 frame (quad spanned 82% of the width, 99.9% of the height). Tried "does the
 blob touch the frame edge" as a discriminator first; rejected it after
-finding a *known-good* single (`20260812_002138234`, a legitimate close-up
+finding a *known-good* single (`002138234`, a legitimate close-up
 shot) with the same near-zero margin on every side -- edge-touching alone
 isn't safe. The signal that actually works: solidity, raw contour area over
 convex hull area. A real card's border has no internal seams, so its raw
 contour already equals its hull (solidity 1.0000, confirmed on
-`20260812_002138234`); the 11-card grid's seams between cells leave notches
+`002138234`); the 11-card grid's seams between cells leave notches
 that only the hull smooths over (solidity 0.9424). Swept solidity across
 every currently-accepted single in both `chekis/rancheki/` and `chekis/main/`
 -- next-lowest was 0.9895, a comfortable margin above the break case. Added
@@ -401,11 +401,11 @@ Files corrected (turn = 90° CCW units):
 
 | file | layout | turn |
 |---|---|---|
-| PXL_20260427_023359428 | 1 row of 2 portrait | 90° |
-| PXL_20260501_015640226 | 1 row of 3 portrait | 90° |
-| PXL_20260501_015731072 | 1 row of 3 portrait | 90° |
-| PXL_20260427_023126095 | 1 row of 2 landscape + 1 row of 4 portrait | 90° |
-| PXL_20260427_023727013 | 1 row of 4 portrait | 180° |
+| 023359428 | 1 row of 2 portrait | 90° |
+| 015640226 | 1 row of 3 portrait | 90° |
+| 015731072 | 1 row of 3 portrait | 90° |
+| 023126095 | 1 row of 2 landscape + 1 row of 4 portrait | 90° |
+| 023727013 | 1 row of 4 portrait | 180° |
 
 No regressions: swept all 49 multi/aligned/`single?` frames, exactly these five
 turned, the other 44 (including a 0°-vs-180° near-tie at 1.61 vs 1.82 that the
@@ -545,7 +545,7 @@ addition that had never made it into the HTML at all.
 
 Porting `solidity` first paid for itself: it exposed a live bug. Without it,
 `detectPrint()`'s single-card gate was just aspect+fill, so a flush 2x2 grid
-(`PXL_20260131_165923174`, four cards laid edge to edge with no gaps) passed
+(`165923174`, four cards laid edge to edge with no gaps) passed
 outright and would have been warped into one mangled card. Solidity there is
 `closedArea / hullArea`, where `closedArea` reuses `countWindows()`'s own
 hole-filling (the JS port has no `cv2.findContours(RETR_EXTERNAL)` to hand it
@@ -572,7 +572,7 @@ itself left for review, JS's window backstop correctly auto-aligns), 6 are
 pre-existing JS/Python blob-detection divergence unrelated to this session's
 changes (already present before this port, just newly visible from doing a
 full comparison for the first time), and 1 is a real, narrow regression:
-`PXL_20260327_154304657`, a genuine single card with bright marker writing
+`154304657`, a genuine single card with bright marker writing
 near its border, where JS's mask has a small real gap Python's doesn't,
 dropping solidity to ~0.56 and demoting it to a flagged near-miss instead of
 an auto-crop. Accepted rather than chased further -- the failure direction is
@@ -894,9 +894,9 @@ the background wins outright:
 
 | file | white from frame | from paper | gain error |
 |---|---|---|---|
-| `20260728_035448131` | 137, 161, 187 (blue) | 145, 140, 132 (neutral) | **116%** |
-| `20260728_035633320` | 143, 171, 195 | 146, 154, 151 | 77% |
-| `20260728_035651788` | 134, 163, 164 | 135, 163, 144 | 34% |
+| `035448131` | 137, 161, 187 (blue) | 145, 140, 132 (neutral) | **116%** |
+| `035633320` | 143, 171, 195 | 146, 154, 151 | 77% |
+| `035651788` | 134, 163, 164 | 135, 163, 144 | 34% |
 
 Shipped anyway, precisely *because* it is a no-op today: it costs the calibrated
 library nothing and removes the dependence on background brightness before a
@@ -918,12 +918,12 @@ allowed. On `chekis/main` that is exactly 6 of 105, with nothing else close:
 
 | file | desk (sRGB) | vs batch median 44 | unclamped gamma |
 |---|---|---|---|
-| `20260211_053747452` | 200, 167, 132 | 3.8× | 1.16 on all 3 |
-| `20260815_224341680` | 218, 142, 89 | 3.4× | 1.16 on all 3 |
-| `20260815_222540256` | 205, 131, 81 | 3.2× | 1.16 on all 3 |
-| `20260630_140740030` | 203, 77, 54 | 2.5× | 1.16 on all 3 |
-| `20260803_034833604` | — | 1.9× | 1.16 on 1 |
-| `20260526_055435791` | 124, 78, 36 | 1.8× | 1.16 on 2 |
+| `053747452` | 200, 167, 132 | 3.8× | 1.16 on all 3 |
+| `224341680` | 218, 142, 89 | 3.4× | 1.16 on all 3 |
+| `222540256` | 205, 131, 81 | 3.2× | 1.16 on all 3 |
+| `140740030` | 203, 77, 54 | 2.5× | 1.16 on all 3 |
+| `034833604` | — | 1.9× | 1.16 on 1 |
+| `055435791` | 124, 78, 36 | 1.8× | 1.16 on 2 |
 
 Two of those are genuinely different surfaces (pale pine, a grey table), one is
 held in the hand, and **three have no visible desk at all** — the prints fill the
@@ -982,7 +982,7 @@ Swept `main/` + `rancheki/` for a threshold that separates. There isn't one:
 So the count is worthless exactly where it was doing damage, and free where it
 isn't. Split into two thresholds: `--multi-windows` stays 7 for near-misses,
 `--card-windows` is 8 for confident fits. What actually separates the one pile
-(`main/20260811_012024586`, a 3-print row) from the 44 cards is aspect — cards
+(`main/012024586`, a 3-print row) from the 44 cards is aspect — cards
 top out at 1.631, it sits at 1.642 — so `--aspect-hi` went 1.65 → 1.64.
 
 Result: **0 files in `main/` reclassify**, and the two rancheki files crop as
@@ -995,7 +995,7 @@ docstring promising it stayed in step. Now fixed and passed the real count.
 
 ### The third report: a crop about a degree askew
 
-`rancheki/PXL_20260601_053951339` (a 3-print row, near-miss, in `review/`) is
+`rancheki/053951339` (a 3-print row, near-miss, in `review/`) is
 levelled to −0.0° when its blob reads +1.204°. Two surviving "windows" of 2.6 k
 and 10 k px both report −0.0°, because a rectangle that small snaps to
 axis-aligned, and `MIN_TILT_WINDOWS` (2) lets them outvote the blob.
@@ -1004,6 +1004,12 @@ Five discriminators were measured and all rejected — see `docs/PIPELINE.md` §
 for the numbers. Every one buys this degree back by costing tens of degrees on
 staggered piles whose blob tilt is genuinely garbage (one falls back to −33°).
 Left as it is: the file is already flagged for review.
+
+**Superseded 2026-08-20.** The five rejections still stand, and so does the
+reason: no filter *inside* the window path works. What was wrong here was the
+conclusion that this was one file's problem. It is 81 of 140, and the fix was to
+stop deciding tilt from windows at all — see the 2026-08-20 entry. This file now
+levels at 1.10°.
 
 ### The phone app deliberately does not get this fix
 
@@ -1015,7 +1021,7 @@ the JS cannot afford the same split, because its solidity is an approximation
 staggered row. Of the four files passing the full JS single gate, the two
 singles and the two multis interleave on every metric — windows 6/7 against
 6/7, aspect 1.579/1.585 against 1.576/1.639 — so any raise that frees the
-singles also frees `20260221_153435918`, three unevenly-laid prints that Python
+singles also frees `153435918`, three unevenly-laid prints that Python
 rejects on shape (0.863/0.793) and the app reads as a clean card (0.995/0.998).
 
 Left at 6. Two singles come out levelled instead of cropped, whole and
@@ -1026,6 +1032,109 @@ Getting to that answer needed numbers the page never showed: `runFile()` now
 keeps the detection on `lastDetection`, and `tools/webdetect.py` records
 `aspect`, `fill` and `solidity`. Without them a sweep can only see which side
 of a threshold each file fell, never how far.
+
+## 2026-08-20 — tilt taken off the prints' edges, and a rationed crop margin
+
+Two complaints on the same two photos: `main/012024586` came out
+with lopsided margins, and `main/154241942` came out askew. Both
+sit on the multi-print alignment path, and they turned out to be separate bugs.
+
+### The tilt was being decided by ink
+
+`154241942` reported `align_tilt` −0.00 on a row visibly leaning 1.5°. Its blob
+rectangle said −1.59, which was about right, so the wrong answer was coming from
+the window path that overrules it. Dumping the holes explained why. Its three
+real photo windows scored 0.617, 0.667 and 0.726 on rectangularity, all under
+`WINDOW_RECT_MIN` (0.75) and all rejected — the signature crosses out of the
+picture area into the border and merges with it, so the hole isn't a rectangle
+any more. What survived were two loops of pen inside the border, 3.4 k and 4.0 k
+px, which the morphology leaves perfectly square: two windows, both −0.00°,
+`MIN_TILT_WINDOWS` satisfied, row reported level.
+
+This is the same failure recorded as unfixable on 2026-08-17 for
+`rancheki/053951339`. It is much more common than that entry
+assumed: across 140 photos, **81** have their tilt decided by holes under a
+quarter the size of the biggest one in the same blob. Most of those read −0.00,
+which is why so much of the library looked level.
+
+A relative area floor does isolate the loops, but it drops two files below
+`MIN_TILT_WINDOWS` onto blob rectangles that are themselves wrong — the −33°
+staggered pile the old entry warned about, and +13° on another. So the
+measurement moved outside the window path entirely: `_edge_dirs()` now reads the
+angle off the prints' **own outline**, every straight run of it weighted by
+length squared, gated on how much those runs agree (`TILT_COHERENCE`, 0.95).
+See `docs/PIPELINE.md` § 6.
+
+Validated against an independent score — how well the paper mask fills its
+axis-aligned bounding box after being rotated by the candidate angle — over all
+140 photos:
+
+| agreement | files | edge angle better | old path better |
+|---|---|---|---|
+| ≥ 0.95 | 67 | 47 (total +0.767) | 16 (total −0.022) |
+| 0.90–0.95 | **0** | — | — |
+| < 0.90 | 7 | 2 (+0.054) | 5 (−0.069) |
+
+The empty band is why the gate is where it is. Above it the wins are large and
+the losses are all fourth-decimal; below it that reverses, and those files are
+cards keystoned steeply enough that their borders aren't two pairs of parallels
+any more — a real measurement of something that isn't a rotation.
+
+Biggest movers, all confirmed by rotating the source and looking:
+
+| file | was | now |
+|---|---|---|
+| `073507152` | −0.00 | **−33.16** (two prints overlapping at a steep angle; genuinely that crooked) |
+| `041152515` | 6.48 | 17.94 |
+| `073338220` | 3.31 | 11.64 |
+| `154241942` | −0.00 | −1.46 (the complaint) |
+| `rancheki/053951339` | −0.00 | 1.10 (the 2026-08-17 "unfixable") |
+| `153435918` | 0.69 | −0.11 |
+
+Reprocessing `chekis/main/` (106 files) and `chekis/rancheki/` (22) with
+`--force`: **no file changed `dest`, `kind`, `flags`, white or gain** except two.
+`073507152` went `aligned` → `multi`: once it is turned 33° no crop shape fits
+inside the frame, and align_multi declines rather than reach into the blank the
+rotation opened. It is left whole and still colour-balanced, which is the
+documented preference. In rancheki, `062001471` went the other way,
+`multi` → `aligned`. Everything else that moved moved `align_tilt` only, 55 of
+106 and 9 of 22, and no crop shape changed anywhere.
+
+### The margin was being spent where there was no desk
+
+`012024586` is a row of three lying 36 px from the left edge of its frame and
+330 from the right. The 4:3 crop chosen for it sits dead centre on the prints at
+its natural size — margins 0 and 0. `CROP_MARGIN` then grows it 4% on *both*
+sides, which no longer fits, so `place()` slides it right against the left edge
+and every new pixel of margin lands on the right: 36 px against 110.
+
+`lopsided()` doesn't catch it (36/110 is inside `CROP_BALANCE`) and loosening it
+far enough to would start refusing crops that are merely tight. Instead the
+margin is now rationed in `CROP_MARGIN_STEPS` (4) steps, taking the largest part
+that still places on the prints' own centre. This frame takes half of it and
+comes out 36/36 horizontally, 250/250 vertically.
+
+### Coverage
+
+`tests/test_pipeline.py` is up to 28. New: a staggered pile whose blob rectangle
+reads 32° off while every card in it is level; a signed row whose windows are
+all ragged; a coherence check that scattered card angles score below the gate; a
+one-sided-desk row whose crop must come out even; and a real-photo tier pinning
+four tilts that used to read exactly 0.00. The margin test now checks both axes
+and includes `012024586`. All five fail against the previous `checleaner.py`.
+
+### The phone app gets the margin fix, not the tilt fix
+
+`alignMulti()`'s grow step is rationed the same way. Sweeping `chekis/main/`
+through the real page with `tools/webdetect.py --compare`: 18 of 106 change, all
+of them **size only** — no verdict, crop shape, window count, white or gain
+moves. Some grow rather than shrink, which is the same fix seen from the other
+side: where the full 4% used to be refused outright the ladder now finds a
+smaller part of it that fits centred. `012024586` comes out even in the app too. The edge-direction tilt is
+not ported: it needs a contour tracer, which the app doesn't have — the same
+gap that makes its solidity an approximation. `dominantTilt()` still averages
+blob rectangles and can still be fooled by a staggered pile. Writing the tracer
+closes both.
 
 ## Known unfixable, so nobody re-litigates them
 

@@ -81,6 +81,15 @@ WINDOW_RECT_MIN = 0.75
 # How many trustworthy windows it takes before their angle is used for the
 # frame's tilt instead of the blob rectangles'. See _dominant_tilt.
 MIN_TILT_WINDOWS = 2
+# Shortest straight run of a blob's outline, in detection pixels, that counts as
+# a card edge rather than a jag in the mask. See _edge_dirs.
+EDGE_MIN_LEN = 8.0
+# How much the outline's straight runs must agree on one angle (mod 90) before
+# that angle is taken as the frame's tilt: the resultant length of their
+# circular mean, 0 (no agreement) to 1 (all parallel or perpendicular). Across
+# the library this lands either above 0.95 or below 0.90 with nothing between,
+# and the two sides behave completely differently -- see _dominant_tilt.
+TILT_COHERENCE = 0.95
 # Mean Scharr magnitude along a paper piece's own boundary, above which it ends
 # crisply enough to be a card rather than a desk sheen fading out. Sheen scored
 # 235-350 across the library against a card's 594-1511. See _sheen_free_bbox.
@@ -287,6 +296,9 @@ class Detection:
     # (tilt, area) per photo window in this blob, for _dominant_tilt. Filled in
     # by detect_all_prints only -- detect_print has no use for it.
     window_tilts: list = field(default_factory=list)
+    # (angle_deg, length) per straight run of this blob's outline, also for
+    # _dominant_tilt and also detect_all_prints only. See _edge_dirs.
+    edge_dirs: list = field(default_factory=list)
     ok: bool = False
     reason: str = ""
 
@@ -577,6 +589,7 @@ def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
         if d is None:
             continue
         d.window_tilts = _window_tilts(seg["labels"], idx)
+        d.edge_dirs = _edge_dirs(seg["labels"], idx)
         dets.append(d)
     # Desk glare gets its own blob here just as it does in detect_print, and it
     # is worse in this direction: align_multi crops around the *union* of every
@@ -677,6 +690,55 @@ def count_windows(path: str, size: int = 1400) -> int | None:
                if stats[i, 4] > 0.005 * sub.shape[0] * sub.shape[1])
 
 
+def _edge_dirs(labels: np.ndarray, idx: int) -> list:
+    """(angle mod 90, length) for every straight run of this blob's outline.
+
+    A card's own edges are the most direct evidence of its angle there is, and
+    unlike a fitted rectangle they survive everything that makes a merged blob's
+    rectangle meaningless: staggering a row rotates the pile's *outline* while
+    every card edge in it stays put, and prints that overlap add a step to the
+    outline without bending either card's border. Ink can't reach them either,
+    since it lands inside the paper rather than on its silhouette.
+
+    Lengths are what a run is worth, so `_dominant_tilt` can weight by them --
+    a card's long straight border should outvote the short jags where the mask
+    turns a corner or a sheen fades out. `approxPolyDP` at 2 px is the point of
+    the whole thing: it keeps a straight border as one long run and breaks a
+    soft or wandering boundary into many short ones, so the weighting sorts
+    real edges from noise on its own without a separate test.
+    """
+    comp = (labels == idx).astype(np.uint8)
+    out = []
+    for c in cv2.findContours(comp, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[0]:
+        if cv2.contourArea(c) < 500:
+            continue
+        poly = cv2.approxPolyDP(c, 2.0, True).reshape(-1, 2).astype(np.float64)
+        for i in range(len(poly)):
+            v = poly[(i + 1) % len(poly)] - poly[i]
+            length = float(np.hypot(v[0], v[1]))
+            if length < EDGE_MIN_LEN:
+                continue
+            out.append((float(np.degrees(np.arctan2(v[1], v[0])) % 90), length))
+    return out
+
+
+def _circular_tilt(angles, weights):
+    """Weighted circular mean of angles that live mod 90, and how much they agree.
+
+    Returns (tilt in [-45, 45), resultant length in [0, 1]). The quadrupling is
+    the same wraparound fix as _tilt_deg: a rectangle looks identical every 90
+    degrees, so +44 and -44 are two degrees apart and a plain mean of them would
+    wrongly land on 0. The resultant length falls out of the same arithmetic for
+    free, and says how tightly the inputs cluster -- 1 when they are all parallel
+    (or perpendicular), near 0 when they point every which way.
+    """
+    theta4 = np.radians(np.asarray(angles, dtype=float)) * 4
+    w = np.asarray(weights, dtype=float)
+    sin, cos = np.average(np.sin(theta4), weights=w), np.average(np.cos(theta4), weights=w)
+    deg = np.degrees(np.arctan2(sin, cos)) / 4 % 90
+    return float(deg - 90 if deg >= 45 else deg), float(np.hypot(sin, cos))
+
+
 def _tilt_deg(quad: np.ndarray) -> float:
     """A blob's tilt from axis-aligned, folded into [-45, 45).
 
@@ -690,15 +752,37 @@ def _tilt_deg(quad: np.ndarray) -> float:
 
 
 def _dominant_tilt(dets: list[Detection]) -> float:
-    """Area-weighted circular mean of blob tilts, mod 90.
+    """How far off level the prints in this frame are, mod 90.
 
-    Area weighting means a couple of small false-positive blobs can't outvote
-    the actual prints. Circular averaging (via the angle-quadrupling trick,
-    since tilt has period 90 not 360) matters for the same wraparound reason
-    as _tilt_deg: a plain mean of +44 and -44 would land on 0, not on the true
-    answer of (roughly) +45 or -45.
+    Three sources in order of trust -- the prints' own edges, their photo
+    windows, their fitted rectangles -- each falling through to the next when it
+    can't be relied on. Everything is weighted (by edge length squared, window
+    area, blob area) so that a couple of small false-positive blobs, short jags
+    in a mask or specks of ink can't outvote the actual prints, and everything
+    is averaged on the circle: mod 90, a plain mean of +44 and -44 would land on
+    0 rather than the true answer of roughly +45. See docs/PIPELINE.md § 6.
     """
-    # Prefer the photo windows' own angles when there are enough of them: a
+    # First choice: the prints' own edges, weighted by length squared. Squared
+    # rather than plain because the question is which *direction* the outline
+    # commits to, and one 400 px card border is far better evidence of that than
+    # fifty 8 px jags that happen to add up to the same total -- plain length
+    # lets the jags outvote the border on a ragged mask.
+    dirs = [e for d in dets for e in d.edge_dirs]
+    if dirs:
+        tilt, agree = _circular_tilt([a for a, _ in dirs],
+                                     [L * L for _, L in dirs])
+        if agree >= TILT_COHERENCE:
+            return tilt
+        # Below the gate the edges disagree, which on this library means a card
+        # steeply enough keystoned that its four borders genuinely aren't two
+        # pairs of parallels any more. The angle is then a real measurement of
+        # something that isn't a rotation, so fall through rather than act on it.
+        # Measured on 140 photos: above the gate the edge angle beats what
+        # follows on 47 files and loses on 16, and every loss is in the fourth
+        # decimal of axis-alignment; below it that reverses. The gate sits in an
+        # empty band -- nothing in the library scores between 0.90 and 0.95.
+
+    # Next: the photo windows' own angles, if enough of them are trustworthy. A
     # merged blob's rectangle describes the *pile's outline*, which on a
     # staggered arrangement is tilted even when every card in it is level, and a
     # bridged-on sheen tilts it further. The windows sit inside the cards, out of
@@ -706,16 +790,9 @@ def _dominant_tilt(dets: list[Detection]) -> float:
     # rectangular enough to trust (see _window_tilts).
     windows = [wt for d in dets for wt in d.window_tilts]
     if len(windows) >= MIN_TILT_WINDOWS:
-        tilts = np.radians([t for t, _ in windows])
-        weights = np.array([a for _, a in windows], dtype=float)
-    else:
-        tilts = np.radians([_tilt_deg(d.quad) for d in dets])
-        weights = np.array([d.area for d in dets])
-    theta4 = tilts * 4
-    mean4 = np.arctan2(np.average(np.sin(theta4), weights=weights),
-                        np.average(np.cos(theta4), weights=weights))
-    deg = np.degrees(mean4) / 4 % 90
-    return float(deg - 90 if deg >= 45 else deg)
+        return _circular_tilt([t for t, _ in windows], [a for _, a in windows])[0]
+    return _circular_tilt([_tilt_deg(d.quad) for d in dets],
+                          [d.area for d in dets])[0]
 
 
 # Preferred crop shapes for multi-print photos, tried in addition to the
@@ -733,6 +810,9 @@ CROP_ASPECTS = [
 # fallback in align_multi), so a frame-filling pile still crops rather than
 # leaving prints jammed to the edge or declining outright.
 CROP_MARGIN = 0.04
+# How finely align_multi may ration that margin when the desk is one-sided and
+# the whole of it would only fit off-centre. See align_multi.
+CROP_MARGIN_STEPS = 4
 # How far past the detection blob to look for the prints' true paper extent,
 # as a fraction of the blob's own size. See _paper_bbox.
 PAPER_HALO = 0.20
@@ -968,10 +1048,29 @@ def align_multi(img: np.ndarray, dets: list[Detection], turn: int = 0):
         # only *after* the shape is settled: growing before choosing would let
         # a frame-filling pile pick a worse-fitting aspect just because the
         # better one no longer fit with margin added.
-        grown_w, grown_h = hw * (1 + CROP_MARGIN), hh * (1 + CROP_MARGIN)
-        grown_at = place(grown_w, grown_h)
-        if grown_at is not None and not lopsided(grown_w, grown_h, *grown_at):
-            hw, hh = grown_w, grown_h
+        #
+        # Take as much of it as can be spent *evenly*, not all of it. Growing
+        # widens the crop on both sides at once, so where the desk is one-sided
+        # the full margin doesn't fit centred and `place` slides the crop to
+        # make it fit -- which puts every new pixel of margin on one side, the
+        # exact lopsidedness the margin was meant to avoid. One real frame had
+        # its prints 36 px from the left edge and 330 from the right: the
+        # ungrown 4:3 crop sat dead centre on them, and the fully grown one came
+        # out with 36 px of desk on the left against 110 on the right. Stepping
+        # the margin down until it places without sliding gives that frame an
+        # even 36 px on both sides instead. `lopsided` doesn't catch this on its
+        # own -- 36 against 110 is within CROP_BALANCE -- and loosening it far
+        # enough to would start refusing crops that are merely tight.
+        for step in range(CROP_MARGIN_STEPS, 0, -1):
+            g = 1 + CROP_MARGIN * step / CROP_MARGIN_STEPS
+            gw, gh = hw * g, hh * g
+            at = place(gw, gh)
+            if at is None or lopsided(gw, gh, *at):
+                continue
+            if abs(at[0] - cx) > pad or abs(at[1] - cy) > pad:
+                continue                               # only fits off-centre
+            hw, hh = gw, gh
+            break
     else:
         # the frame's own shape (as turned) -- exactly the pre-CROP_ASPECTS
         # behaviour, and by construction of new_w/new_h it can only fail the

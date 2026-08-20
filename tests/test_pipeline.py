@@ -21,6 +21,7 @@ white 238.8, black 2.2, instax aspect 1.5926, border ratio ~2.1.
 """
 import os
 import sys
+import glob
 import tempfile
 
 import numpy as np
@@ -160,6 +161,68 @@ def make_row(frame_w=1400, cols=2, seed=0):
     return img.astype(np.uint8)
 
 
+def _draw_signed_card(img, y0, x0, card_h, card_w, seed):
+    """One print with its photo window and a signature scrawled across it.
+
+    Every print in this library is signed, and the ink matters to the geometry:
+    a stroke crossing out of the photo area merges with it, so the hole the
+    window leaves in the paper mask is no longer a rectangle and the angle
+    fitted to it stops being trustworthy. Fixtures that leave the windows clean
+    therefore test a photo this library doesn't contain.
+    """
+    img[y0:y0+card_h, x0:x0+card_w] = np.clip(
+        BORDER + _noise((card_h, card_w, 3), 2, seed), 0, 255)
+    wy0, wy1 = y0 + int(card_h*.08), y0 + int(card_h*.60)
+    wx0 = x0 + int(card_w*.12)
+    img[wy0:wy1, wx0:x0+int(card_w*.88)] = WINDOW
+    cv2.line(img, (wx0 + int(card_w*.08), wy1 - int(card_h*.04)),
+             (x0 + int(card_w*.74), y0 + int(card_h*.84)),
+             tuple(float(v) for v in WINDOW), int(card_w * .24))
+
+
+def make_signed_row(frame_w=1400, cols=2, tilt=1.5, offset=0.0, seed=3):
+    """A row of signed prints (see _draw_signed_card), turned by `tilt`.
+
+    `offset` slides the row sideways as a fraction of the frame width, for the
+    one-sided-desk case in align_multi.
+    """
+    frame_h = int(frame_w * 1.2)
+    img = np.clip(DESK + _noise((frame_h, frame_w, 3), 2, seed), 0, 255)
+    card_w = int(frame_w * 0.68 / cols)          # the row spans most of the frame
+    card_h = int(card_w * ASPECT)
+    oy = (frame_h - card_h) // 2
+    ox = int((frame_w - cols * card_w) // 2 + offset * frame_w)
+    for c in range(cols):
+        _draw_signed_card(img, oy, ox + c * card_w, card_h, card_w, seed + c)
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    if tilt:
+        M = cv2.getRotationMatrix2D((frame_w/2, frame_h/2), tilt, 1.0)
+        img = cv2.warpAffine(img, M, (frame_w, frame_h),
+                             flags=cv2.INTER_LINEAR, borderValue=tuple(DESK.tolist()))
+    return img
+
+
+def make_staggered_pile(frame_w=1200, cards=3, seed=5):
+    """Level prints dealt corner to corner, so they merge into one blob whose
+    minAreaRect follows the *staircase* rather than any card in it.
+
+    Half a card's step each way is enough to turn that rectangle 32 degrees off
+    a pile that is perfectly straight -- the same trap a real photo in this
+    library sets at 33 degrees. Every straight run of the same outline is still
+    a card border lying dead level.
+    """
+    frame_h = int(frame_w * 1.6)
+    img = np.clip(DESK + _noise((frame_h, frame_w, 3), 2, seed), 0, 255)
+    card_w = int(frame_w * 0.34)
+    card_h = int(card_w * ASPECT)
+    step_x, step_y = card_w // 2, card_h // 2
+    oy = (frame_h - card_h - (cards-1)*step_y) // 2
+    ox = (frame_w - card_w - (cards-1)*step_x) // 2
+    for c in range(cards):
+        _draw_signed_card(img, oy + c*step_y, ox + c*step_x, card_h, card_w, seed+c)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
 def make_grid(frame_w=1400, gap=16, rot=4.0, seed=7):
     """A 2x2 grid of hand-placed (so slightly rotated) cards. Two stacked cards
     are as tall as they are wide-per-two, so the grid's *aspect* lands right in
@@ -190,6 +253,21 @@ def _write(rgb):
     os.close(fd)
     cv2.imwrite(path, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
     return path
+
+
+def _photo(folder, stamp):
+    """The source photo in `folder` whose name carries `stamp`, or None if it
+    isn't there (the opt-in tier reads that as "skip this one").
+
+    Real photos are named by the *time* part of their filename alone --
+    `012024586`, not `PXL_YYYYMMDD_012024586.MP.jpg`. The time is unique across
+    the whole library, so the date and extension are only noise to read past,
+    and the stamp survives a file being renamed or re-exported.
+    """
+    hits = [h for h in sorted(glob.glob(os.path.join(folder, f"*{stamp}*")))
+            if os.path.isfile(h)]
+    assert len(hits) < 2, f"{stamp} matches more than one photo: {hits}"
+    return hits[0] if hits else None
 
 
 def _is_single(det):
@@ -420,10 +498,10 @@ def test_grid_is_rejected_by_solidity_not_aspect():
 # single card. Skipped per-file when absent, so a fresh clone (no photos) still
 # passes; present, it pins the behaviour on the real images.
 REAL_NOT_SINGLE = [
-    "PXL_20260427_023359428.MP.jpg",   # the original sideways complaint (landscape stack)
-    "PXL_20260803_041037832.MP.jpg",   # 3x3-ish grid
-    "PXL_20260427_023727013.MP.jpg",   # four overlapping prints
-    "PXL_20260427_023126095.MP.jpg",   # two landscape prints stacked
+    "023359428",   # the original sideways complaint (landscape stack)
+    "041037832",   # 3x3-ish grid
+    "023727013",   # four overlapping prints
+    "023126095",   # two landscape prints stacked
 ]
 
 
@@ -433,8 +511,8 @@ def test_real_multiprint_photos_never_single():
         skip("chekis/main not present (photos are gitignored)")
     checked = 0
     for name in REAL_NOT_SINGLE:
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+        path = _photo(folder, name)
+        if path is None:
             continue
         checked += 1
         assert not _is_single(detect_print(path)), f"{name} misclassified as single"
@@ -443,8 +521,8 @@ def test_real_multiprint_photos_never_single():
 
 
 def test_real_grid_photo_fails_solidity():
-    path = os.path.join(REPO, "chekis", "main", "PXL_20260803_041037832.MP.jpg")
-    if not os.path.exists(path):
+    path = _photo(os.path.join(REPO, "chekis", "main"), "041037832")
+    if path is None:
         skip("grid reference photo not present")
     d = detect_print(path)
     assert d.solidity < DEFAULTS.min_solidity, f"real grid solidity {d.solidity:.3f} no longer caught"
@@ -461,9 +539,9 @@ def test_real_angled_cards_fit_their_corners():
     if not os.path.isdir(folder):
         skip("chekis/main not present (photos are gitignored)")
     checked = 0
-    for name in ["PXL_20260401_073304486.MP.jpg", "PXL_20260401_073350228.MP.jpg"]:
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+    for name in ["073304486", "073350228"]:
+        path = _photo(folder, name)
+        if path is None:
             continue
         checked += 1
         d = detect_print(path)
@@ -486,12 +564,12 @@ def test_real_window_counts_split_near_misses_from_singles():
         skip("chekis/main not present (photos are gitignored)")
     thresh = DEFAULTS.multi_windows
     checked = 0
-    for name, side in [("PXL_20260427_023126095.MP.jpg", "multi"),   # 6 prints, 10 windows
-                       ("PXL_20260427_023727013.MP.jpg", "multi"),   # 4 prints, 10 windows
-                       ("PXL_20260427_023820588.MP.jpg", "single"),  # busiest genuine single: 6
-                       ("PXL_20260427_023252712.MP.jpg", "single")]:
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+    for name, side in [("023126095", "multi"),   # 6 prints, 10 windows
+                       ("023727013", "multi"),   # 4 prints, 10 windows
+                       ("023820588", "single"),  # busiest genuine single: 6
+                       ("023252712", "single")]:
+        path = _photo(folder, name)
+        if path is None:
             continue
         checked += 1
         wins = count_windows(path)
@@ -509,8 +587,8 @@ def test_row_that_looks_like_a_card_is_caught_by_aspect_not_windows():
     the single gate -- and would be warped into one card if shape were the only
     check. The window backstop must still catch it, which is why the count is
     run for single-gate passers too, not only near-misses."""
-    path = os.path.join(REPO, "chekis", "main", "PXL_20260811_012024586.MP.jpg")
-    if not os.path.exists(path):
+    path = _photo(os.path.join(REPO, "chekis", "main"), "012024586")
+    if path is None:
         skip("row-shaped reference photo not present")
     d = detect_print(path)
     assert d.fill >= DEFAULTS.min_fill and d.solidity >= DEFAULTS.min_solidity, \
@@ -539,20 +617,34 @@ def test_window_backstop_is_stricter_for_a_confident_card_fit():
             "enough windows must still overrule even a confident fit"
 
 
+# Photos whose tilt the ink in their borders used to decide. Each has every
+# photo window scrawled across, so their fitted rectangles are ragged and any
+# clean hole left is a loop of pen -- small, and square whatever the card under
+# it is doing. All four read exactly 0.00 before the tilt was taken off the
+# prints' own edges instead; the last is a pair overlapping at a steep angle,
+# and is here so a coherence gate that swallowed real rotations would show up.
+REAL_TILT = {
+    "154241942": -1.46,
+    "023437053": 1.41,
+    "041311208": 0.88,
+    "073507152": -33.16,
+}
+
+
 # Multi-print photos that align_multi levels but leaves mis-turned, with the
 # quarter/half turn (in 90-degree CCW units) that stands them upright...
 REAL_REORIENT = {
-    "PXL_20260427_023359428.MP.jpg": 1,   # row of 2 portrait, a quarter turn off
-    "PXL_20260501_015640226.MP.jpg": 1,
-    "PXL_20260501_015731072.MP.jpg": 1,
-    "PXL_20260427_023126095.MP.jpg": 1,   # mixed landscape+portrait, all a quarter off
-    "PXL_20260427_023727013.MP.jpg": 2,   # row of 4 portrait, upside down
+    "023359428": 1,   # row of 2 portrait, a quarter turn off
+    "015640226": 1,
+    "015731072": 1,
+    "023126095": 1,   # mixed landscape+portrait, all a quarter off
+    "023727013": 2,   # row of 4 portrait, upside down
 }
 # ...and multi-print photos already upright, which must be left untouched.
 REAL_UPRIGHT = [
-    "PXL_20260427_023252712.MP.jpg",
-    "PXL_20260810_014211016.MP.jpg",
-    "PXL_20260427_022950306.MP.jpg",      # a near-tie the margin rule must protect
+    "023252712",
+    "014211016",
+    "022950306",      # a near-tie the margin rule must protect
 ]
 
 
@@ -580,12 +672,12 @@ def test_real_sheen_is_cut_off_the_blob():
     if not os.path.isdir(folder):
         skip("chekis/main not present (photos are gitignored)")
     # file -> smallest fraction of the blob's width/height the trim should remove
-    sheened = {"PXL_20260202_130131692.MP.jpg": 0.20,
-               "PXL_20260205_142612680.MP.jpg": 0.20}
+    sheened = {"130131692": 0.20,
+               "142612680": 0.20}
     checked = 0
     for name, want in sheened.items():
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+        path = _photo(folder, name)
+        if path is None:
             continue
         checked += 1
         seg = checleaner._segment_prints(path, 1100)
@@ -598,8 +690,8 @@ def test_real_sheen_is_cut_off_the_blob():
                      1 - (y1 - y0) / (ys.max() - ys.min()))
         assert shrink >= want, f"{name}: only trimmed {shrink:.0%}, want >= {want:.0%}"
 
-    clean = os.path.join(folder, "PXL_20260803_041037832.MP.jpg")
-    if os.path.exists(clean):
+    clean = _photo(folder, "041037832")
+    if clean is not None:
         checked += 1
         seg = checleaner._segment_prints(clean, 1100)
         idx = max(seg["big"], key=lambda i: seg["stats"][i, cv2.CC_STAT_AREA])
@@ -617,7 +709,12 @@ def test_real_aligned_crops_have_balanced_margins():
     """align_multi recentres on the true paper extent, so opposite desk margins
     come out roughly equal even when the detection blob overshoots the prints at
     one edge. These files each had a tight edge opposite a 33-69px one before the
-    recentre; assert the top/bottom desk margins now match within 20px."""
+    recentre; assert opposite desk margins now match within 20px.
+
+    Both axes, because they fail differently: the vertical ones here were the
+    blob overshooting the prints, while `012024586` is a row lying 36 px from
+    the left edge of its frame and 330 from the right, where the failure was
+    spending the whole of CROP_MARGIN on a side that had no desk to spare."""
     folder = os.path.join(REPO, "chekis", "main")
     if not os.path.isdir(folder):
         skip("chekis/main not present (photos are gitignored)")
@@ -625,10 +722,9 @@ def test_real_aligned_crops_have_balanced_margins():
         skip("face model unavailable (turn affects the crop orientation)")
     import numpy as np
     checked = 0
-    for name in ["PXL_20260803_041037832.MP.jpg", "PXL_20260804_005646298.MP.jpg",
-                 "PXL_20260803_034550829.MP.jpg"]:
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+    for name in ["041037832", "034550829", "012024586"]:
+        path = _photo(folder, name)
+        if path is None:
             continue
         img = cv2.imread(path)
         out = align_multi(img, detect_all_prints(path), turn=content_rotation(img))
@@ -639,13 +735,105 @@ def test_real_aligned_crops_have_balanced_margins():
         paper = ((lab[:, :, 0] > 0.62 * hi)
                  & (np.hypot(lab[:, :, 1] - 128, lab[:, :, 2] - 128) < 16)).astype(np.uint8)
         paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
-        H = paper.shape[0]
+        H, W = paper.shape[:2]
         rows = np.where(paper.max(axis=1) > 0)[0]
+        cols = np.where(paper.max(axis=0) > 0)[0]
         top, bottom = int(rows.min()), int(H - 1 - rows.max())
+        left, right = int(cols.min()), int(W - 1 - cols.max())
         checked += 1
         assert abs(top - bottom) <= 20, f"{name}: top {top} vs bottom {bottom} margin"
+        assert abs(left - right) <= 20, f"{name}: left {left} vs right {right} margin"
     if checked == 0:
         skip("none of the margin reference photos are present")
+
+
+def test_staggered_prints_are_not_levelled_by_their_own_outline():
+    """Level prints dealt corner to corner merge into one blob whose fitted
+    rectangle follows the staircase, not any card in it. Turning the frame by
+    that would tilt prints that were already straight; the outline's straight
+    runs are all card borders and still say level."""
+    img = make_staggered_pile()
+    path = _write(img)
+    try:
+        dets = detect_all_prints(path)
+        assert dets, "the pile should segment"
+        tilt = checleaner._dominant_tilt(dets)
+        worst = max(abs(checleaner._tilt_deg(d.quad)) for d in dets)
+    finally:
+        os.unlink(path)
+    assert worst > 2.0, (
+        f"fixture isn't staggered enough to be a test: blob rect reads {worst:.2f}")
+    assert abs(tilt) < 0.5, f"level prints reported at {tilt:.2f} degrees"
+
+
+def test_signed_row_is_levelled_from_its_edges():
+    """The everyday case: a tilted row whose windows are all ragged with ink.
+    The tilt still has to come out right."""
+    img = make_signed_row(tilt=1.5)
+    path = _write(img)
+    try:
+        tilt = checleaner._dominant_tilt(detect_all_prints(path))
+    finally:
+        os.unlink(path)
+    # align_multi turns the frame *by* this, so correcting a +1.5 degree
+    # rotation means reporting -1.5.
+    assert abs(tilt + 1.5) < 0.4, f"tilt {tilt:.2f}, wanted about -1.5"
+
+
+def test_coherence_gate_falls_back_rather_than_trusting_scattered_edges():
+    """The edge angle is only used when the outline's straight runs agree on
+    one direction. A frame of cards at four different angles has no such
+    direction, and must not be levelled to whichever one happened to win."""
+    img = make_grid(rot=25.0)
+    path = _write(img)
+    try:
+        dets = detect_all_prints(path)
+        dirs = [e for d in dets for e in d.edge_dirs]
+        _, agree = checleaner._circular_tilt([a for a, _ in dirs],
+                                             [L * L for _, L in dirs])
+    finally:
+        os.unlink(path)
+    assert agree < checleaner.TILT_COHERENCE, (
+        f"cards at scattered angles scored {agree:.3f} agreement")
+
+
+def test_crop_margin_is_rationed_when_the_desk_is_one_sided():
+    """CROP_MARGIN is breathing room, and growing the crop widens it on both
+    sides at once. Where the desk is one-sided the whole margin only fits by
+    sliding the crop, which puts all of it on one side -- so take the largest
+    part of it that still sits centred on the prints."""
+    img = make_signed_row(tilt=0.0, offset=-0.14)
+    path = _write(img)
+    try:
+        out = align_multi(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), detect_all_prints(path))
+    finally:
+        os.unlink(path)
+    assert out is not None, "a level row on plenty of desk should crop"
+    crop = out[0]
+    lab = cv2.cvtColor(cv2.GaussianBlur(crop, (7, 7), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    paper = ((lab[:, :, 0] > 0.62 * np.percentile(lab[:, :, 0], 99))
+             & (np.hypot(lab[:, :, 1] - 128, lab[:, :, 2] - 128) < 16)).astype(np.uint8)
+    paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+    cols = np.where(paper.max(axis=0) > 0)[0]
+    left, right = int(cols.min()), int(crop.shape[1] - 1 - cols.max())
+    assert abs(left - right) <= 0.01 * crop.shape[1], (
+        f"left margin {left} vs right {right} of {crop.shape[1]}")
+
+
+def test_real_tilts_come_from_the_prints_not_the_ink():
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    checked = 0
+    for name, want in REAL_TILT.items():
+        path = _photo(folder, name)
+        if path is None:
+            continue
+        got = checleaner._dominant_tilt(detect_all_prints(path))
+        checked += 1
+        assert abs(got - want) < 0.25, f"{name}: tilt {got:.2f}, wanted {want}"
+    if checked == 0:
+        skip("none of the tilt reference photos are present")
 
 
 def test_real_multiprint_reorientation():
@@ -656,15 +844,15 @@ def test_real_multiprint_reorientation():
         skip("face model unavailable (offline / not cached)")
     checked = 0
     for name, want in REAL_REORIENT.items():
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+        path = _photo(folder, name)
+        if path is None:
             continue
         checked += 1
         got = content_rotation(cv2.imread(path))
         assert got == want, f"{name}: reorient turned {got*90}, want {want*90}"
     for name in REAL_UPRIGHT:
-        path = os.path.join(folder, name)
-        if not os.path.exists(path):
+        path = _photo(folder, name)
+        if path is None:
             continue
         checked += 1
         got = content_rotation(cv2.imread(path))
