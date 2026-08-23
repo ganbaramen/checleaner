@@ -137,6 +137,8 @@ const CROP_MARGIN = 0.04;
 // How finely alignMulti() may ration that margin when the desk is one-sided and
 // the whole of it would only fit off-centre.
 const CROP_MARGIN_STEPS = 4;
+// Rows of clean paper that end a run of desk in trimInsets' edge scan. See there.
+const TRIM_GAP = 6;
 // How far past the blob to look for the prints' true paper extent.
 const PAPER_HALO = 0.20;
 // Least a crop's smaller margin may be as a fraction of its larger one, on the
@@ -893,10 +895,18 @@ function trimInsets(img, w, h, deskHue, nv, deskL) {
     const proj = (A[i] - 128) * deskHue[0] + (B[i] - 128) * deskHue[1];
     return proj > 0.55 * nv && L[i] < 1.25 * deskL;
   };
+  // Contiguous from the edge, not the deepest hit anywhere in the window: real
+  // desk is attached to the edge it came in from, while a patch of desk-coloured
+  // pixels with clean paper between it and the edge is something *on* the print.
+  // What that turns out to be is the signature -- black marker is dark and picks
+  // up enough of the desk's warmth to pass both halves of isDesk, so a date
+  // written near the top border dragged the trim the full 3.5% cap and cut the
+  // writing in half. TRIM_GAP rows of clean paper end the run, which still lets
+  // a shadow fade in and out. Port of checleaner.py's trim_desk scan.
   const scan = (axis, fromStart) => {
     const span = axis === "y" ? h : w;
     const cap = Math.round(0.035 * span);
-    let last = -1;
+    let last = -1, clean = 0;
     for (let k = 0; k < cap; k++) {
       const idx = fromStart ? k : span - 1 - k;
       const across = axis === "y" ? w : h;
@@ -905,7 +915,8 @@ function trimInsets(img, w, h, deskHue, nv, deskL) {
         const i = axis === "y" ? idx * w + t : t * w + idx;
         tot++; if (isDesk(i)) hits++;
       }
-      if (hits / tot > 0.08) last = k;
+      if (hits / tot > 0.08) { last = k; clean = 0; }
+      else if (++clean > TRIM_GAP) break;
     }
     return last >= 0 ? last + 4 : 0;
   };

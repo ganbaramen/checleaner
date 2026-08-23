@@ -112,11 +112,14 @@ python3 tools/webdetect.py --save /tmp/js <files…>        # write the correcte
 `--compare` prints only the files whose verdict moved, which is how you sweep
 before changing a JS threshold — the JS ones (`MULTI_WINDOWS`,
 `CARD_EDGE_SHARP`) are calibrated separately from Python's and can't be reasoned
-about from the Python side. It tracks output **dimensions**, **white** and
-**gain** as well as the labels: a geometry change routinely moves the pixels
-while every caption stays identical, and a colour change moves neither the
-pixels' count nor any label. Both gaps were found the same way — by making a
-change on purpose and watching the tool report nothing.
+about from the Python side. Alongside the labels it tracks output
+**dimensions**, **white**, **gain**, and an 8×8 luminance **thumbprint** of the
+result. Each was added after the tool reported "nothing changed" for a change
+made on purpose: a geometry change moves the pixels while every caption stays
+identical, a colour change moves neither the pixel count nor any label, and a
+single-card crop always warps to the same 1800 × 2867 — so for those, the
+thumbprint is the *only* field that can move. Assume the next blind spot exists
+and test for it the same way.
 
 Two things to know before concluding the app has hung: the page has three
 terminal states, not one (done, "couldn't find a white border", and thrown), and
@@ -228,7 +231,7 @@ directly.
    targets, aspect, orientation, single-vs-multi); the phone app still has no
    assertions. The driving half is already done — `tools/webdetect.py` loads the
    page, feeds it files, and reports `kind`/`crop`/`size`/`white`/`gain`/
-   `aspect`/`fill`/`solidity`/`glare`/`windows` — so what's left is feeding it the
+   `aspect`/`fill`/`solidity`/`glare`/`windows`/`sig` — so what's left is feeding it the
    synthetic fixtures and asserting on those numbers, rather than only diffing
    two sweeps by hand. Optionally add real-photo golden numbers from
    `docs/HISTORY.md` to the opt-in tier.

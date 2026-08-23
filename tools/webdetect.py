@@ -65,10 +65,29 @@ READ = """() => ({
   // flag text mentions aspect, so without this a sweep can't calibrate the
   // thresholds -- it can only see which side of them each file landed.
   det: typeof lastDetection !== 'undefined' ? lastDetection : null,
+  // An 8x8 luminance thumbprint of the output. `size` catches a geometry change
+  // only when the output's *dimensions* move, and for a single-card crop they
+  // never do -- every one warps to the same 1800x2867. A trim that cut 53 px off
+  // the top of a card diffed as "0 of 105 changed" without this. Quantised to
+  // 64 levels so encoder jitter doesn't diff, which still leaves it sensitive to
+  // any real shift of the pixels.
+  sig: (() => {
+    if (typeof resultCanvas === 'undefined' || !resultCanvas) return '-';
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const g = c.getContext('2d');
+    g.drawImage(resultCanvas, 0, 0, 8, 8);
+    const d = g.getImageData(0, 0, 8, 8).data, out = [];
+    for (let i = 0; i < 64; i++) {
+      const q = i * 4;
+      out.push(Math.round((0.299 * d[q] + 0.587 * d[q+1] + 0.114 * d[q+2]) / 4));
+    }
+    return out.join('.');
+  })(),
 })"""
 
 FIELDS = ["file", "kind", "crop", "size", "white", "gain", "aspect", "fill",
-          "solidity", "glare", "windows", "prints", "tilt", "flags"]
+          "solidity", "glare", "windows", "prints", "tilt", "sig", "flags"]
 
 
 def summarise(name: str, out: dict) -> dict:
@@ -117,6 +136,7 @@ def summarise(name: str, out: dict) -> dict:
         "windows": grab(r"photo windows(\d+)"),
         "prints": grab(r"prints seen(\d+)"),
         "tilt": grab(r"levelled(-?[\d.]+)°"),
+        "sig": out.get("sig", "-"),
         "flags": re.sub(r"\(aspect [\d.]+\)", "(aspect N)", flags),
     }
 

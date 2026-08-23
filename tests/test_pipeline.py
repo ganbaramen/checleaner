@@ -37,7 +37,7 @@ import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
                         detect_print, detect_all_prints, align_multi, warp, orient,
                         build_parser, content_rotation, count_windows,
-                        single_fit, _needs_review,
+                        single_fit, _needs_review, trim_desk,
                         _cached_measurement, run, ASPECT)
 from tools.detect import classify   # the single/single?/multi gate, one copy
 
@@ -811,6 +811,31 @@ def test_a_ragged_blob_is_not_rescued_by_the_sheen_trim():
     assert DEFAULTS.aspect_lo <= det.aspect <= DEFAULTS.aspect_hi, (
         f"fixture no longer tests the rule: aspect {det.aspect:.3f} is outside the band")
     assert not ok, "a grid of cards must not be rescued into a single card"
+
+
+def test_writing_near_a_border_is_not_trimmed_as_desk():
+    """Black marker is dark and picks up enough of the desk's warmth to pass
+    trim_desk's desk test. A date written close to the top border used to drag
+    the trim the whole 3.5% cap and cut the writing in half -- real desk is
+    contiguous with the edge it came in from, ink in the border is not."""
+    img = make_single()
+    h, w = img.shape[:2]
+    card_h = int(h * 0.62)
+    card_w = int(card_h / ASPECT)
+    y0, x0 = (h - card_h) // 2, (w - card_w) // 2
+    # a stroke of dark, faintly desk-warm ink, one clean border's width in
+    ink = np.array([DESK[0] * 0.55, DESK[1] * 0.45, DESK[2] * 0.40], np.float32)
+    img = img.astype(np.float32)
+    img[y0 + int(card_h * .028):y0 + int(card_h * .046),
+        x0 + int(card_w * .15):x0 + int(card_w * .85)] = ink
+    path = _write(np.clip(img, 0, 255).astype(np.uint8))
+    try:
+        det = detect_print(path)
+        _, insets = trim_desk(cv2.cvtColor(np.clip(img, 0, 255).astype(np.uint8),
+                                           cv2.COLOR_RGB2BGR), det.quad)
+    finally:
+        os.unlink(path)
+    assert insets["top"] <= 8, f"trimmed {insets['top']}px into the border for ink"
 
 
 def test_notes_are_recorded_without_sending_a_photo_to_review():

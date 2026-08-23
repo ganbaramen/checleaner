@@ -1224,20 +1224,47 @@ Result on `chekis/main/` (106 files): **103 balanced, 3 review**, from 84/22. Th
 three are all near-misses left whole. `chekis/rancheki/` goes from 1 to 0. No
 file's colour changed; `145119616` is the only file whose geometry did.
 
+### The overcrop that came out from under it
+
+Cropping `145119616` for the first time exposed a second, older bug immediately:
+the crop came back with the top of "2026.3.7" sliced off. The fit was right --
+its top edge sits exactly on the card's -- and `trim_desk()` then pulled 53 px
+further in.
+
+`trim_desk` scans each edge inward for desk-coloured lines and takes the
+**deepest hit anywhere** in its 3.5% window. Instrumenting the scan: rows 0-24
+of the border read 0.000 desk, and rows 42-54 read 0.09-0.24. That is not desk
+creeping in from the edge, it is the *writing* -- black marker is dark (`L < 1.25
+x` the desk's) and picks up enough of the desk's warmth to clear the projection
+test too. One deep row of ink set the deepest hit to the cap.
+
+Real desk is contiguous with the edge it came in from; ink in the border is an
+island with clean paper in front of it. The scan now ends a run after `TRIM_GAP`
+(6) clean lines. Sweeping every photo that crops as a single, this changes the
+insets on exactly one file -- the one complained about. Every trim any other
+file needs was already contiguous with its edge, which is also why the old
+behaviour survived this long. Gap values 4-10 all give that same answer; at 2,
+`033323480`'s genuine 13-px right trim drops to 0.
+
 ### The phone app gets this one
 
-`checleaner.html` had the same bug and now has the same fix — `detectPrint()`
+`checleaner.html` had both bugs and now has both fixes — `detectPrint()`
 returns a `sheenFree` reading of the largest blob (window count re-run confined
 to the box, so its approximated solidity is measured on what survives) and the
 rescue is gated on aspect identically. `153435918` is untouched because in the JS
 it never fails on shape at all: its approximated solidity reads 0.998 and only
 the window count holds it back, so the rescue never applies.
 
-One trap worth recording: `clipToBox()` can hand back the opposite winding, and
+Two traps worth recording. `clipToBox()` can hand back the opposite winding and
 `polyArea` is signed, so `fill` came out negative and the rescue silently never
-fired. Re-hulling the clipped points fixes it — the same thing `all` already does
-for the crop outlines. `tools/webdetect.py` now reports a `glare` column, which
-is how the silent failure was caught.
+fired; re-hulling the clipped points fixes it, the same thing `all` already does
+for the crop outlines. And the trim fix swept as **"0 of 105 changed"** — a
+single-card crop always warps to 1800 × 2867, so not one field `webdetect.py`
+tracked could move. It now also records an 8×8 luminance thumbprint of the
+output; recomputed on the two saved crops, 46 of its 64 cells differ, and it is
+byte-stable across repeat runs of the same build. That is the third blind spot
+this tool has had, each found by making a change on purpose and watching it
+report nothing.
 
 ## Known unfixable, so nobody re-litigates them
 

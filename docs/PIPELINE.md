@@ -428,6 +428,19 @@ dimension) for lines that are desk-coloured. Test by projecting chroma onto the
 desk's hue direction — shadow keeps the hue while losing lightness, so this
 survives the shadow a card casts on its lee side.
 
+**The scan stops at clean paper, and takes the run contiguous with the edge —
+not the deepest hit anywhere in the window.** Real desk in a crop is attached to
+the edge it came in from. A patch of desk-coloured pixels with clean paper
+between it and the edge is something *on the print*, and what that turns out to
+be is the signature: black marker is dark, and picks up enough of the desk's
+warmth to satisfy both halves of the test. A date written close to the top
+border dragged the trim the full 3.5% cap and cut the writing in half.
+`TRIM_GAP` (6) rows of clean paper end the run, which still lets a shadow fade
+in and out on the way in. Anything from 4 to 10 gives the same answer across the
+whole library; at 2, one file's genuine 13-px right-edge trim drops to 0. This
+changes exactly one photo — every trim any other file needs is already
+contiguous with its edge.
+
 Then **second-guess it with a different test**: a plain warm-and-dark check
 (R > B + 12 and mean < 170) on the finished crop. Deliberately not the hue model,
 so it does not share that model's blind spots. Skip the outermost 4 px — every

@@ -1190,6 +1190,12 @@ def warp(img: np.ndarray, quad: np.ndarray, out_w: int) -> np.ndarray:
                                flags=cv2.INTER_LANCZOS4)
 
 
+# Rows of clean paper that end a run of desk in trim_desk's edge scan. Anything
+# from 4 to 10 gives the same answer on the whole library; below that a real
+# shadow fringe starts being cut short (one file's 13-px right trim drops to 0).
+TRIM_GAP = 6
+
+
 def trim_desk(img: np.ndarray, quad: np.ndarray, cap=0.035, analysis_w=900):
     """Pull each edge inward past any desk that crept into the crop.
 
@@ -1229,13 +1235,32 @@ def trim_desk(img: np.ndarray, quad: np.ndarray, cap=0.035, analysis_w=900):
     desk = (proj > 0.55 * nv) & (lab[:, :, 0] < 1.25 * mu[0])
 
     def scan(axis, which):
-        last, limit = -1, int(cap * (ah if axis == "y" else aw))
+        """How deep desk reaches in from this edge, in analysis-crop pixels.
+
+        Contiguous from the edge, not the deepest hit anywhere in the window.
+        Real desk in a crop is attached to the edge it came in from; a patch of
+        desk-coloured pixels with clean paper between it and the edge is
+        something *on* the print -- and what that turns out to be is the
+        signature. Black marker strokes are dark and pick up enough of the
+        desk's warmth to pass both halves of the test, so a date written near
+        the top border used to drag the trim the full 3.5% cap and cut the
+        writing in half. `TRIM_GAP` rows of clean paper end the run, which still
+        lets a shadow fade in and out on the way. Across the library this
+        changes exactly that one photo: every trim any other file needs is
+        already contiguous with its edge.
+        """
+        last, clean = -1, 0
+        limit = int(cap * (ah if axis == "y" else aw))
         for i in range(limit):
             idx = i if which < 0 else ((ah - 1 - i) if axis == "y" else (aw - 1 - i))
             line = desk[idx, :] if axis == "y" else desk[:, idx]
             core = line[int(0.12 * len(line)):int(0.88 * len(line))]
             if core.mean() > 0.08:
-                last = i
+                last, clean = i, 0
+            else:
+                clean += 1
+                if clean > TRIM_GAP:
+                    break
         return last + 4 if last >= 0 else 0
 
     t, b = scan("y", -1), scan("y", 1)
