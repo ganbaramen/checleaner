@@ -68,7 +68,7 @@ READ = """() => ({
 })"""
 
 FIELDS = ["file", "kind", "crop", "size", "white", "gain", "aspect", "fill",
-          "solidity", "windows", "prints", "tilt", "flags"]
+          "solidity", "glare", "windows", "prints", "tilt", "flags"]
 
 
 def summarise(name: str, out: dict) -> dict:
@@ -111,6 +111,9 @@ def summarise(name: str, out: dict) -> dict:
         "aspect": f"{det['aspect']:.3f}" if det.get("aspect") is not None else "-",
         "fill": f"{det['fill']:.3f}" if det.get("fill") is not None else "-",
         "solidity": f"{det['solidity']:.3f}" if det.get("solidity") is not None else "-",
+        # whether the single-card fit came from the glare-trimmed reading of the
+        # blob rather than the blob itself -- a change here moves no other field
+        "glare": "trimmed" if det.get("glareTrimmed") else "-",
         "windows": grab(r"photo windows(\d+)"),
         "prints": grab(r"prints seen(\d+)"),
         "tilt": grab(r"levelled(-?[\d.]+)°"),

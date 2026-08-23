@@ -299,6 +299,9 @@ class Detection:
     # (angle_deg, length) per straight run of this blob's outline, also for
     # _dominant_tilt and also detect_all_prints only. See _edge_dirs.
     edge_dirs: list = field(default_factory=list)
+    # The same blob with any bridged-on desk glare cut off, or None when there
+    # was none to cut. detect_print only; see single_fit.
+    sheen_free: "Detection | None" = None
     ok: bool = False
     reason: str = ""
 
@@ -558,7 +561,91 @@ def detect_print(path: str, size: int = 1100) -> Detection:
         if di is not None and di.fill >= PRINT_FILL:
             n += 1
     d.n_blobs = n
+    # A second reading of the same blob, with any bridged-on desk glare cut off.
+    # It is an alternative, not a replacement -- see single_fit for when it is
+    # allowed to stand, and docs/PIPELINE.md § 3 for why it must not simply
+    # replace the first. Built last so it inherits the finished blob count.
+    d.sheen_free = _trimmed_detection(seg, idx, d)
     return d
+
+
+def _trimmed_detection(seg, idx: int, raw: Detection):
+    """`raw` re-measured on the sheen-free box, or None if there is nothing to cut.
+
+    Desk glare next to a print segments as paper and the 43-px close welds it on,
+    so the rectangle fitted to the blob is pulled out to cover desk: one real
+    single card read aspect 1.434, fill 0.858 with a glare patch hanging off its
+    corner, against 1.576 / 0.998 once cut. `_sheen_free_bbox` already finds the
+    right box -- this just measures inside it.
+    """
+    box = _sheen_free_bbox(seg, idx)
+    if box is None:
+        return None
+    blob = seg["labels"] == idx
+    x0, x1, y0, y1 = box
+    trimmed = np.zeros_like(blob)
+    trimmed[y0:y1 + 1, x0:x1 + 1] = blob[y0:y1 + 1, x0:x1 + 1]
+    if not trimmed.any():
+        return None
+    labels = trimmed.astype(np.int32)
+    d = _blob_detection(labels, 1, seg["sc"])
+    if d is None:
+        return None
+    d.rect_aspect = d.aspect
+    cq = _card_quad(labels, 1, seg["sc"])
+    if cq is not None:
+        d.quad, d.aspect = cq
+        d.cornered = True
+    d.n_blobs = raw.n_blobs
+    return d
+
+
+def single_gate(det: Detection, args) -> bool:
+    """Is this blob confidently one card? Shape only -- see single_fit.
+
+    One copy, called from run() and from tools/detect.py, because the two have
+    already drifted apart once: the window backstop went into run() and was
+    never mirrored into the preview, which then reported "single" for two files
+    a real run demoted.
+    """
+    if det is None or det.quad is None:
+        return False
+    # A fitted four-corner card (det.cornered) has already proved itself
+    # rectangular in a way a merged pile can't fake, so it earns a small
+    # solidity relaxation -- an angled card's mask edge is slightly raggeder
+    # than a square-on one's. See CARD_SOLIDITY_MIN.
+    solidity_floor = (min(args.min_solidity, CARD_SOLIDITY_MIN)
+                      if det.cornered else args.min_solidity)
+    return (args.aspect_lo <= det.aspect <= args.aspect_hi
+            and det.fill >= args.min_fill
+            and det.solidity >= solidity_floor)
+
+
+def single_fit(det: Detection, args) -> tuple[bool, Detection]:
+    """Whether this photo holds one croppable card, and the fit to crop it by.
+
+    Normally the blob's own measurements decide. If they don't, and the *shape*
+    is what failed, the sheen-free reading of the same blob gets one try: an
+    appendage of desk glare distorts the fitted rectangle, and cutting it off is
+    exactly what `_sheen_free_bbox` is for.
+
+    Only the shape may be rescued this way. A blob that failed on fill or
+    solidity while its aspect was already card-like failed because its *outline*
+    is ragged, and that is what a pile of prints looks like from the outside --
+    trimming a bounding box off one would launder a real row into a card and the
+    crop would warp it. The library has one photo of each kind and they separate
+    cleanly on this: the single reads aspect 1.434 (outside the band, rescued),
+    the three-print row reads 1.581 (inside it, refused, fill 0.863).
+    """
+    if det.quad is None or det.n_blobs != 1:
+        return False, det
+    if single_gate(det, args):
+        return True, det
+    if (det.sheen_free is not None
+            and not (args.aspect_lo <= det.aspect <= args.aspect_hi)
+            and single_gate(det.sheen_free, args)):
+        return True, det.sheen_free
+    return False, det
 
 
 def detect_all_prints(path: str, size: int = 1100) -> list[Detection]:
@@ -1167,6 +1254,22 @@ def trim_desk(img: np.ndarray, quad: np.ndarray, cap=0.035, analysis_w=900):
     return src[::-1], dict(top=t, bottom=b, left=l, right=r)
 
 
+# Flag prefixes that describe an output without condemning it. They are
+# recorded in report.csv and printed like any other flag, but they do not move
+# the file into review/. The distinction is precision: judged against a batch of
+# 106, the flags below this line fired on 10 photos and every one of them was
+# fine to look at, which is a check that costs attention and buys nothing. What
+# each measures is real and still worth recording -- a hairline of desk left on
+# one edge, a paper reference that was partly blown when the shutter fired --
+# but neither is a reason to hold the photo back. See docs/PIPELINE.md § 7.
+REVIEW_NOTES = ("desk still on", "white reference")
+
+
+def _needs_review(flags) -> bool:
+    """Does anything in `flags` actually warrant pulling the file out?"""
+    return any(not f.startswith(REVIEW_NOTES) for f in flags)
+
+
 def residual_desk(crop_bgr: np.ndarray, skip=4, probe=0.02) -> dict:
     """How deep desk still reaches into each edge of a finished crop, in pixels.
 
@@ -1514,8 +1617,8 @@ def run(args) -> int:
                 for flag in (f.strip() for f in old.get("flags", "").split(";")):
                     if flag and flag not in r.flags:
                         r.flags.append(flag)
-                for k in ("aspect", "fill", "border_ratio", "align_tilt", "align_n",
-                          "align_crop", "reorient", "windows"):
+                for k in ("aspect", "fill", "solidity", "border_ratio", "align_tilt",
+                          "align_n", "align_crop", "reorient", "windows"):
                     v = old.get(k)
                     if v not in (None, ""):
                         r.stats[k] = v
@@ -1536,16 +1639,7 @@ def run(args) -> int:
 
         if not args.no_crop:
             det = detect_print(path)
-            # A fitted four-corner card (det.cornered) has already proved itself
-            # rectangular in a way a merged pile can't fake, so it earns a small
-            # solidity relaxation -- an angled card's mask edge is slightly
-            # raggeder than a square-on one's. See CARD_SOLIDITY_MIN.
-            solidity_floor = (min(args.min_solidity, CARD_SOLIDITY_MIN)
-                              if det.cornered else args.min_solidity)
-            single = (det.quad is not None and det.n_blobs == 1
-                      and args.aspect_lo <= det.aspect <= args.aspect_hi
-                      and det.fill >= args.min_fill
-                      and det.solidity >= solidity_floor)
+            single, det = single_fit(det, args)
             # Near-miss stays on the blob's own minAreaRect aspect, which is what
             # this band was calibrated against; reading it off the corner fit
             # instead pulls in photos that were classifying fine as multi-print.
@@ -1606,8 +1700,8 @@ def run(args) -> int:
                         content_rotation(cv2.cvtColor(rgb8, cv2.COLOR_RGB2BGR)))
                 if near_miss:
                     r.kind = "single?"
-                    r.flags.append(f"fit rejected (aspect {det.aspect:.3f}, fill {det.fill:.3f}, "
-                                   f"solidity {det.solidity:.3f})")
+                    r.stats.update(aspect=round(det.aspect, 3), fill=round(det.fill, 3),
+                                   solidity=round(det.solidity, 3))
                 # Level and crop a near-miss too, rather than leaving it whole.
                 # Nothing here can tell a badly-fitted single card from several
                 # prints overlapped into a card-shaped pile -- windows, fill and
@@ -1628,10 +1722,22 @@ def run(args) -> int:
                 if turn:                    # single? / align declined: turn whole
                     img = np.ascontiguousarray(np.rot90(img, turn))
                     r.stats["reorient"] = turn * 90
+                # A near-miss is only worth a human look when *nothing* could be
+                # done with the frame. Levelled and cropped, it is a good
+                # multi-print result whether or not the card guess was right --
+                # 11 of them in one batch, every one fine. Left whole, the
+                # pipeline has applied no geometry at all, so if it really was
+                # one card badly fitted, nothing downstream recovers it. That is
+                # the case this band exists to surface, and `kind` records the
+                # near-miss either way.
+                if near_miss and aligned is None:
+                    r.flags.append(
+                        f"left whole (fit rejected: aspect {det.aspect:.3f}, "
+                        f"fill {det.fill:.3f}, solidity {det.solidity:.3f})")
         else:
             r.kind = "nocrop"
 
-        dest_dir = review_dir if r.flags else good_dir
+        dest_dir = review_dir if _needs_review(r.flags) else good_dir
         # a reprocess (--force, or a code change) can reclassify a file --
         # drop any stale copy left in the other directory so it isn't
         # duplicated across both
@@ -1647,7 +1753,7 @@ def run(args) -> int:
 
     _write_report(os.path.join(out_root, "report.csv"), files, results)
     _write_review_notes(review_dir, files, results)
-    n_review = sum(1 for r in results.values() if r.flags)
+    n_review = sum(1 for r in results.values() if _needs_review(r.flags))
     skip_note = f" ({n_skipped} unchanged, skipped)" if n_skipped else ""
     print(f"\n{len(files) - n_review} in balanced/, {n_review} in review/{skip_note}")
     print(f"report: {os.path.join(out_root, 'report.csv')}")
@@ -1687,17 +1793,17 @@ def _write_report(path, files, results):
         # match makes the output more faithful, not less, so there is nothing
         # for a human to check and no reason to route the file to review/.
         wr.writerow(["file", "dest", "kind", "white_before", "black_before", "gain",
-                     "clipped_pct", "desk", "desk_match", "aspect", "fill",
+                     "clipped_pct", "desk", "desk_match", "aspect", "fill", "solidity",
                      "border_ratio", "align_tilt", "align_n", "align_crop",
                      "reorient", "windows", "flags"])
         for name in files:
             r = results[name]
             s = r.stats
-            dest = "review" if r.flags else "balanced"
+            dest = "review" if _needs_review(r.flags) else "balanced"
             wr.writerow([name, dest, r.kind, s.get("white_before"), s.get("black_before"),
                          s.get("gain"), s.get("clipped_pct"), s.get("desk"),
                          s.get("desk_match", ""), s.get("aspect"),
-                         s.get("fill"), s.get("border_ratio"),
+                         s.get("fill"), s.get("solidity"), s.get("border_ratio"),
                          s.get("align_tilt"), s.get("align_n"), s.get("align_crop"),
                          s.get("reorient"), s.get("windows"),
                          "; ".join(r.flags)])
@@ -1709,21 +1815,26 @@ def _write_report(path, files, results):
 _FLAG_EXPLANATIONS = [
     ("white reference",
      "The print's white border was overexposed in the original photo, so the "
-     "colour correction it's based on is a bit of a guess. Check the colours "
-     "don't look washed out or tinted -- if the photo was shot in bright "
-     "light, that's the fix for next time, not something to redo here."),
+     "colour correction is based on a smaller sample than usual. Recorded, "
+     "not held back: every photo in the calibrated library that hit this -- up "
+     "to 70% of the border blown -- still landed on the 238.8 white target, "
+     "because what survives is a hundred thousand pixels rather than the 800 "
+     "the measurement needs. If a photo does come out washed out or tinted, "
+     "the fix is one stop down next time, not a reprocess."),
     ("extreme correction",
      "This photo needed an unusually large colour correction. Check for "
      "over-saturated colour or noisy shadows, especially in reds."),
-    ("fit rejected",
-     "Found one blob that's roughly card-shaped but not confident enough to "
-     "crop automatically. Look at the photo: if it's genuinely a single "
-     "print (shot at an odd angle, say), crop and straighten it yourself; if "
-     "it's actually multiple prints -- the usual reason this fires -- it's "
-     "already colour-balanced correctly and needs nothing further."),
+    ("left whole (fit rejected",
+     "One blob roughly card-shaped, but not confident enough to crop as a "
+     "single print -- and levelling couldn't find a crop that fits inside the "
+     "frame either, so the photo has been colour-balanced and otherwise left "
+     "exactly as shot. If it is genuinely a single print, crop and straighten "
+     "it yourself; if it's several prints, it needs nothing further. (A "
+     "near-miss that *was* levelled and cropped doesn't come here -- the "
+     "result is good either way. `kind` in report.csv still says `single?`.)"),
     ("desk still on",
      "A sliver of desk is still visible on one edge of the crop. Trim it "
-     "further by hand if it bothers you."),
+     "further by hand if it bothers you. Recorded, not held back."),
     ("orientation uncertain",
      "The two ends of the print's border looked too similar in width to "
      "confidently tell which one is the wide signature border. Check "
@@ -1755,7 +1866,8 @@ def _write_review_notes(review_dir, files, results):
     describes, so what needs a look is readable without cross-referencing
     report.csv or console output -- which matters when a run is driven by an
     agent and nobody's watching stdout live."""
-    flagged = [(name, results[name]) for name in files if results[name].flags]
+    flagged = [(name, results[name]) for name in files
+               if _needs_review(results[name].flags)]
     with open(os.path.join(review_dir, "report.txt"), "w") as fh:
         if not flagged:
             fh.write("Nothing needs review.\n")

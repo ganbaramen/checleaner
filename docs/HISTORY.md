@@ -1136,6 +1136,109 @@ gap that makes its solidity an approximation. `dominantTilt()` still averages
 blob rectangles and can still be fooled by a staggered pile. Writing the tracer
 closes both.
 
+## 2026-08-22 — review cut from 22 files to 3, and a card rescued from its own glare
+
+Looking through `main/review/`: 20 of the 22 files there were fine. The two that
+weren't were `145119616` (a single card, badly cropped) and `154257343` (a
+purikura sheet, not cropped at all).
+
+### `145119616`: glare welded to the card
+
+Its blob reads aspect 1.434, fill 0.858 — nowhere near a card — because a patch
+of desk glare sits off its bottom-right corner and the 43-px segmentation close
+welds the two together. `_sheen_free_bbox()` already finds the right box; it just
+wasn't allowed to speak, because feeding the trimmed box into the single-vs-multi
+decision turns a 3-print pile into a 1.88 slab (recorded 2026-08-16).
+
+`single_fit()` now gives it one try, and only when the **aspect** is what failed.
+That condition is the safety: an appendage distorts the fitted rectangle, while a
+blob that was already card-shaped and failed on fill or solidity is *ragged*,
+which is what a pile looks like from outside. Sweeping the library, the naive
+version (retry on any failure) promotes two files — the card, and
+`153435918`, the three-print row `docs/PIPELINE.md` § 3 explicitly warns must
+never be cropped as one card, which would come out warped. The aspect condition
+separates them: 1.434 against 1.581. With it, exactly one file moves.
+
+Four other separators were measured first and all overlap:
+
+| | `145119616` (card) | `153435918` (row) |
+|---|---|---|
+| photo windows | 1 | 6 (genuine singles reach 6 too) |
+| windows lost to the trim | 0 | 0 |
+| share of the cut that is really sheen | 38% | 34% |
+| mean chroma per piece | 4.4 | 4.7 |
+
+`145119616` now crops to 1800 × 2867 at aspect 1.576. The window backstop still
+guards the rescue: it counts 1, far below `--card-windows` (8).
+
+### `154257343`: not fixed, and here is how far it got
+
+The purikura sheet has a large glare patch running off the top-left corner of the
+frame, merged into the prints' blob. Every crop shape is then flush against two
+frame edges, `lopsided()` rejects all of them, and `align_multi()` declines — so
+the photo is left whole. It is genuinely the same bug as above, and none of the
+levers reach it:
+
+- `_sheen_free_bbox` scores that patch **548** mean Scharr, against card pieces
+  at 590–929. `CARD_EDGE_SHARP` is 450 and there is no gap to move it into.
+- The patch encloses no photo window, but neither do three real card pieces of
+  `153435918` (windows 0, 0, 0 against the glare's 0).
+- Its chroma is 4.69 against the cards' 4.44–5.56.
+
+Left in `review/`, which is now the *only* thing in `main/review/` that is
+actually wrong, and it is there for the right reason: a near-miss left whole.
+
+### What goes to review at all
+
+`review/` is for outputs likely to be wrong. Judged against the whole batch:
+
+| check | fired on | actually wrong | now |
+|---|---|---|---|
+| `fit rejected` | 12 | 2 | narrowed to `left whole (fit rejected: …)` |
+| `desk still on … edge` | 4 | 0 | a note (`REVIEW_NOTES`) |
+| `white reference … clipped` | 6 | 0 | a note |
+
+Notes are written to `report.csv` and printed, but do not move the file. Both
+measure something real that is not a reason to hold a photo back:
+
+- The residual-desk reading is **saturated, not graded**. `residual_desk()` looks
+  only 2% into each edge on purpose — probe 10% instead and it starts reading the
+  print's own picture area, reporting a "residual" on 25 of 32 crops. So the four
+  photos that fired read 36 px and 57 px, which *are* that 2% on those axes.
+  Raising `--max-residual` past them would disable the check rather than relax
+  it, and each is a hairline along one edge.
+- A clipped white reference has never broken the correction. The worst photo in
+  the library blows **69%** of its bright pixels and still keeps 103,000 usable
+  border pixels — 129× the 800 `measure()` treats as too few — and lands on white
+  239.0. All six flagged photos landed within a point of target.
+
+The near-miss band is narrowed rather than dropped, because it is the check that
+caught both real problems. It now fires only when the frame was **left whole**:
+levelled and cropped, a near-miss is a good multi-print result whether or not the
+card guess was right (11 of them, every one fine), but left whole the pipeline
+has applied no geometry at all. `kind` still records `single?` either way, and
+`aspect`/`fill`/`solidity` now go into `report.csv` columns instead of living
+only inside the flag text (`solidity` is a new column).
+
+Result on `chekis/main/` (106 files): **103 balanced, 3 review**, from 84/22. The
+three are all near-misses left whole. `chekis/rancheki/` goes from 1 to 0. No
+file's colour changed; `145119616` is the only file whose geometry did.
+
+### The phone app gets this one
+
+`checleaner.html` had the same bug and now has the same fix — `detectPrint()`
+returns a `sheenFree` reading of the largest blob (window count re-run confined
+to the box, so its approximated solidity is measured on what survives) and the
+rescue is gated on aspect identically. `153435918` is untouched because in the JS
+it never fails on shape at all: its approximated solidity reads 0.998 and only
+the window count holds it back, so the rescue never applies.
+
+One trap worth recording: `clipToBox()` can hand back the opposite winding, and
+`polyArea` is signed, so `fill` came out negative and the rescue silently never
+fired. Re-hulling the clipped points fixes it — the same thing `all` already does
+for the crop outlines. `tools/webdetect.py` now reports a `glare` column, which
+is how the silent failure was caught.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

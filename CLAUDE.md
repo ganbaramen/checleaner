@@ -74,11 +74,19 @@ assuming it. It's also the ground truth the JS port is calibrated against.
 
 `report.csv` records every measurement and flag, including for files that
 passed — check it rather than assuming a clean run means clean output. Its
-`dest` column says `balanced` or `review` outright (derived from whether
-`flags` is empty, so it can't drift out of sync with where the file actually
-landed); `review/report.txt` lists just the flagged files and why, next to the
-photos themselves — meant to be readable without watching console output,
-which matters when a run is driven by an agent rather than a terminal.
+`dest` column says `balanced` or `review` outright (derived from the flags, so
+it can't drift out of sync with where the file actually landed);
+`review/report.txt` lists just the flagged files and why, next to the photos
+themselves — meant to be readable without watching console output, which
+matters when a run is driven by an agent rather than a terminal.
+
+Not every flag sends a photo to `review/`. Ones listed in `REVIEW_NOTES` are
+**notes**: recorded and printed, but the file still lands in `balanced/`
+(`_needs_review()`). `review/` is for outputs likely to be *wrong*, and a check
+that fires on good ones costs attention and buys nothing — measured against
+`chekis/main/`, the two notes fired on 10 photos and every one was fine. See
+`docs/PIPELINE.md` § 7 before promoting or demoting one; the answer comes from
+looking at what actually fired, not from taste.
 
 `tests/test_pipeline.py` pins the numbers for `checleaner.py`: colour targets
 (white 238.8, black 2.2), single-card aspect, the orientation flip, and the
@@ -172,6 +180,13 @@ directly.
   Python-only** — `checleaner.html` keeps one threshold (6) because its
   approximated solidity can't see a staggered row's notches, so the count is the
   only thing stopping one being cropped as a card. Don't "finish the port".
+- **The sheen-free box is a second opinion in `detect_print`, never a
+  replacement.** `single_fit()` retries the single-card gate on it only when the
+  blob's *aspect* was what failed — a glare appendage distorts the fitted
+  rectangle, while a blob that was already card-shaped and failed on
+  fill/solidity is ragged, which is what a pile looks like from outside.
+  Loosening that to any failure laundered a real 3-print row into a single card
+  in the sweep. See `docs/PIPELINE.md` § 3.
 - **Frame tilt comes from the prints' own edges**, not from a rectangle fitted
   to the blob and not from the photo windows (`_edge_dirs`, `docs/PIPELINE.md`
   § 6). Both alternatives fail on real photos in this library and fail
@@ -213,7 +228,7 @@ directly.
    targets, aspect, orientation, single-vs-multi); the phone app still has no
    assertions. The driving half is already done — `tools/webdetect.py` loads the
    page, feeds it files, and reports `kind`/`crop`/`size`/`white`/`gain`/
-   `aspect`/`fill`/`solidity`/`windows` — so what's left is feeding it the
+   `aspect`/`fill`/`solidity`/`glare`/`windows` — so what's left is feeding it the
    synthetic fixtures and asserting on those numbers, rather than only diffing
    two sweeps by hand. Optionally add real-photo golden numbers from
    `docs/HISTORY.md` to the opt-in tier.

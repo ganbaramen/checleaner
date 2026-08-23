@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import checleaner
 from checleaner import (build_parser, detect_print, detect_all_prints,
                         align_multi, warp, orient, trim_desk, count_windows,
-                        CARD_SOLIDITY_MIN)
+                        single_fit)
 
 
 def classify(det, d, windows=None) -> str:
@@ -45,14 +45,10 @@ def classify(det, d, windows=None) -> str:
     It did lie: the photo-window backstop was added to run() and never mirrored
     here, so this reported "single" for two files a real run demoted to multi.
     Hence `windows` is not optional in spirit -- pass the count, or the answer
-    is only the pre-backstop half of the decision.
+    is only the pre-backstop half of the decision. The shape half is now
+    `single_fit()`, imported rather than restated, so it can't drift again.
     """
-    solidity_floor = (min(d.min_solidity, CARD_SOLIDITY_MIN)
-                      if det.cornered else d.min_solidity)
-    single = (det.quad is not None and det.n_blobs == 1
-              and d.aspect_lo <= det.aspect <= d.aspect_hi
-              and det.fill >= d.min_fill
-              and det.solidity >= solidity_floor)
+    single, _ = single_fit(det, d)
     near_miss = (det.quad is not None and det.n_blobs == 1
                  and 1.40 <= det.rect_aspect <= 1.90)
     if (single or near_miss) and windows is not None:
@@ -120,19 +116,25 @@ def main() -> int:
         det = detect_print(path)
         wins = count_windows(path)
         kind = classify(det, d, wins)
+        # Report the fit run() would actually crop by, not the raw blob: when the
+        # glare rescue fires they are different numbers, and printing the raw
+        # ones makes a "single" verdict look like it came out of nowhere.
+        fit = single_fit(det, d)[1] if kind == "single" else det
         extra = f" windows={wins}" if wins is not None else ""
+        if fit is not det:
+            extra += "  (glare trimmed)"
         if kind == "multi":
             dets = detect_all_prints(path)
             img = cv2.imread(path)
             aligned = align_multi(img, dets) if img is not None else None
             extra += f"  {len(dets)} blobs, {'level' if aligned is not None else 'whole'}"
-        print(f"{name:<38} {kind:<8} n_blobs={det.n_blobs} "
-              f"aspect={det.aspect:.3f} fill={det.fill:.3f} solidity={det.solidity:.3f}{extra}")
+        print(f"{name:<38} {kind:<8} n_blobs={fit.n_blobs} "
+              f"aspect={fit.aspect:.3f} fill={fit.fill:.3f} solidity={fit.solidity:.3f}{extra}")
         if args.sheen:
             print(f"{'':<38} {sheen_report(path)}")
         if kind == "single" and args.crop:
             img = cv2.imread(path)
-            quad, _ = trim_desk(img, det.quad)
+            quad, _ = trim_desk(img, fit.quad)
             crop, ratio = orient(warp(img, quad, d.width))
             out = os.path.join(args.crop, name)
             cv2.imwrite(out, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])

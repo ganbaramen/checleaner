@@ -37,6 +37,7 @@ import checleaner
 from checleaner import (measure, solve_levels, to_linear, to_srgb, soft_shoulder,
                         detect_print, detect_all_prints, align_multi, warp, orient,
                         build_parser, content_rotation, count_windows,
+                        single_fit, _needs_review,
                         _cached_measurement, run, ASPECT)
 from tools.detect import classify   # the single/single?/multi gate, one copy
 
@@ -220,6 +221,30 @@ def make_staggered_pile(frame_w=1200, cards=3, seed=5):
     ox = (frame_w - card_w - (cards-1)*step_x) // 2
     for c in range(cards):
         _draw_signed_card(img, oy + c*step_y, ox + c*step_x, card_h, card_w, seed+c)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def make_single_with_welded_glare(frame_w=1200, seed=0):
+    """A lone card with a patch of desk glare close enough that the
+    segmentation close welds the two into one blob.
+
+    Distinct from make_single_with_glare, where the patch stands off far enough
+    to segment separately: there the blob count catches it, here it becomes part
+    of the card's own blob and drags the fitted rectangle out over desk. The
+    patch fades at its edges, which is the only thing that tells it from paper
+    (`CARD_EDGE_SHARP`), so it is drawn as a soft-edged ellipse rather than a
+    hard-edged one.
+    """
+    img = make_single(frame_w, seed=seed).astype(np.float32)
+    h, w = img.shape[:2]
+    card_h = int(h * 0.62)
+    card_w = int(card_h / ASPECT)
+    x1 = (w + card_w) // 2                          # the card's right edge
+    gap = int(w * 0.02)                             # too wide for the open, not for the close
+    alpha = np.zeros((h, w), np.float32)
+    alpha[(h - card_h) // 2:(h + card_h) // 2, x1 + gap:x1 + gap + int(w * 0.045)] = 1.0
+    alpha = cv2.GaussianBlur(alpha, (0, 0), w * 0.012)   # soft edges: this is the tell
+    img = img * (1 - alpha[:, :, None]) + BORDER * alpha[:, :, None]
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
@@ -502,6 +527,9 @@ REAL_NOT_SINGLE = [
     "041037832",   # 3x3-ish grid
     "023727013",   # four overlapping prints
     "023126095",   # two landscape prints stacked
+    "153435918",   # three unevenly-laid prints: aspect 1.581 is card-like, so
+                   # only fill/solidity reject it -- and the sheen-free box the
+                   # glare rescue uses reads 0.996/0.994, which would launder it
 ]
 
 
@@ -623,6 +651,11 @@ def test_window_backstop_is_stricter_for_a_confident_card_fit():
 # it is doing. All four read exactly 0.00 before the tilt was taken off the
 # prints' own edges instead; the last is a pair overlapping at a steep angle,
 # and is here so a coherence gate that swallowed real rotations would show up.
+# Real photos whose single-card fit is only reachable once desk glare welded on
+# by the segmentation close is cut off. See single_fit.
+REAL_GLARE_RESCUE = ["145119616"]
+
+
 REAL_TILT = {
     "154241942": -1.46,
     "023437053": 1.41,
@@ -747,6 +780,50 @@ def test_real_aligned_crops_have_balanced_margins():
         skip("none of the margin reference photos are present")
 
 
+def test_glare_welded_to_a_card_is_cut_before_the_fit():
+    """Desk glare bridged onto a card by the segmentation close pulls the fitted
+    rectangle out over desk -- the shape, not the raggedness, is what breaks.
+    The sheen-free reading of the same blob gets to stand in that case."""
+    path = _write(make_single_with_welded_glare())
+    try:
+        det = detect_print(path)
+        ok, fit = single_fit(det, DEFAULTS)
+    finally:
+        os.unlink(path)
+    assert not (DEFAULTS.aspect_lo <= det.aspect <= DEFAULTS.aspect_hi), (
+        f"fixture's glare no longer distorts the aspect ({det.aspect:.3f})")
+    assert ok, f"glare-welded card not rescued (raw aspect {det.aspect:.3f})"
+    assert fit is det.sheen_free, "should have been fitted on the trimmed blob"
+    assert abs(fit.aspect - ASPECT) < 0.03, f"rescued aspect {fit.aspect:.3f}"
+
+
+def test_a_ragged_blob_is_not_rescued_by_the_sheen_trim():
+    """Only a distorted *shape* may be rescued. A blob whose aspect is already
+    card-like and which failed on fill or solidity failed because its outline is
+    ragged, and that is what a pile of prints looks like from outside -- letting
+    a bounding box launder one would warp a real row into a single card."""
+    path = _write(make_grid())
+    try:
+        det = detect_print(path)
+        ok, _ = single_fit(det, DEFAULTS)
+    finally:
+        os.unlink(path)
+    assert DEFAULTS.aspect_lo <= det.aspect <= DEFAULTS.aspect_hi, (
+        f"fixture no longer tests the rule: aspect {det.aspect:.3f} is outside the band")
+    assert not ok, "a grid of cards must not be rescued into a single card"
+
+
+def test_notes_are_recorded_without_sending_a_photo_to_review():
+    """Some checks describe an output without condemning it. They stay in
+    report.csv and in the console line; they must not move the file."""
+    assert not _needs_review(["desk still on top edge (~57px)"])
+    assert not _needs_review(["white reference 70% clipped"])
+    assert not _needs_review([])
+    assert _needs_review(["orientation uncertain (border ratio 1.20)"])
+    assert _needs_review(["white reference 70% clipped",
+                          "extreme correction (gain [1.9, 1.8, 1.7])"])
+
+
 def test_staggered_prints_are_not_levelled_by_their_own_outline():
     """Level prints dealt corner to corner merge into one blob whose fitted
     rectangle follows the staircase, not any card in it. Turning the frame by
@@ -818,6 +895,27 @@ def test_crop_margin_is_rationed_when_the_desk_is_one_sided():
     left, right = int(cols.min()), int(crop.shape[1] - 1 - cols.max())
     assert abs(left - right) <= 0.01 * crop.shape[1], (
         f"left margin {left} vs right {right} of {crop.shape[1]}")
+
+
+def test_real_glare_welded_cards_still_crop():
+    folder = os.path.join(REPO, "chekis", "main")
+    if not os.path.isdir(folder):
+        skip("chekis/main not present (photos are gitignored)")
+    checked = 0
+    for stamp in REAL_GLARE_RESCUE:
+        path = _photo(folder, stamp)
+        if path is None:
+            continue
+        checked += 1
+        det = detect_print(path)
+        ok, fit = single_fit(det, DEFAULTS)
+        assert ok, (f"{stamp}: not rescued (raw aspect {det.aspect:.3f}, "
+                    f"fill {det.fill:.3f}, solidity {det.solidity:.3f})")
+        assert fit is det.sheen_free, f"{stamp}: rescued but fitted on the raw blob"
+        assert count_windows(path) < DEFAULTS.card_windows, (
+            f"{stamp}: the window backstop would overrule this anyway")
+    if checked == 0:
+        skip("none of the glare reference photos are present")
 
 
 def test_real_tilts_come_from_the_prints_not_the_ink():

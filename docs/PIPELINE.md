@@ -207,10 +207,39 @@ Three details are load-bearing:
   the blob standing; if less than `SHEEN_KEEP_MIN` of the bounding box survives,
   the edge test has rejected real cards and the whole answer is discarded (one
   photo kept a single 0.5% piece and its crop collapsed).
-- **Only the crop path sees the trimmed box.** `_sheen_free_bbox()` is called
-  from `detect_all_prints()`, never from `detect_print()`. Feeding it to the
-  single-vs-multi decision as well turns a 3-print pile's trimmed box into a
-  1.88 slab, which reads as a near-miss single instead of the 1.30 multi it is.
+- **The classification path sees it only as a second opinion.**
+  `_sheen_free_bbox()` may not simply replace the blob in `detect_print()`:
+  feeding the trimmed box straight into the single-vs-multi decision turns a
+  3-print pile's box into a 1.88 slab, which reads as a near-miss single instead
+  of the 1.30 multi it is. So `single_fit()` tries it only after the blob's own
+  measurements have failed, and only when what failed was the **aspect**.
+
+  That condition is the whole safety of it. An appendage of glare distorts the
+  fitted rectangle — one real single card read aspect 1.434, fill 0.858 with a
+  patch welded to its side, against 1.576 / 0.998 once cut — so a shape failure
+  is the signature of something stuck on. A blob that failed on *fill or
+  solidity* while its aspect was already card-like failed because its outline is
+  ragged, and that is what a pile looks like from outside; trimming a bounding
+  box off one would launder a real row into a card and the crop would warp it.
+  The library holds one photo of each kind and they separate on exactly this:
+  the single at aspect 1.434 (outside the band, rescued), the three-print row
+  `153435918` at 1.581 (inside it, refused, fill 0.863). Sweeping every photo,
+  the rule promotes that one file and nothing else.
+
+  Four other ways to tell the two apart were measured first and **all failed**:
+  photo-window count (1 against 6, but genuine singles reach 6 too), whether the
+  trim removes any window (neither loses one), how much of what the box cuts is
+  really sheen (38% against 34% — overlapping), and mean chroma per piece (4.4
+  against 4.7).
+
+The rescue is ported too: `detectPrint()` returns a `sheenFree` reading of the
+largest blob, with `countWindows()` re-run confined to the box so its
+approximated solidity is measured on what survives. `153435918` is untouched
+there because in the JS it never fails on shape at all — its approximated
+solidity reads 0.998 and only the window count holds it back. Watch the winding:
+`clipToBox()` can return the opposite one and `polyArea` is signed, so the
+clipped points go back through `convexHull()` before being measured, the same
+thing the crop outlines already do.
 
 Ported to `checleaner.html` as `sheenFreeBox()`, with two JS-specific notes.
 Its `CARD_EDGE_SHARP` is **105**, not 450: the JS Scharr runs on a canvas-decoded
@@ -728,6 +757,54 @@ component; everything else is classic CV. It lives only in `checleaner.py`; the
 phone app does the rest of the alignment but stands the result upright by hand.
 
 ---
+
+## 7. What goes to review
+
+`review/` is for photos whose *output* is likely to be wrong. Everything the run
+measures lands in `report.csv` either way, so the only question for each check is
+whether it predicts a bad picture — a check that fires on good ones costs
+attention and buys nothing.
+
+Judged against `chekis/main/` (106 photos, every flagged output looked at), three
+checks were firing on photos that were fine:
+
+| check | fired on | actually wrong | now |
+|---|---|---|---|
+| `fit rejected` (near-miss single) | 12 | 2 | narrowed to `left whole (fit rejected: …)` |
+| `desk still on … edge` | 4 | 0 | a **note** |
+| `white reference … clipped` | 6 | 0 | a **note** |
+
+A **note** (`REVIEW_NOTES`, `_needs_review()`) is written to `report.csv` and
+printed on the console like any other flag, but does not move the file. Both of
+today's notes measure something real that is nonetheless not a reason to hold a
+photo back:
+
+- **Residual desk** is capped by its own probe. `residual_desk()` only looks 2%
+  into each edge, deliberately — go deeper and it starts reading the print's own
+  picture area, which is dark and often warm (probing 10% instead reports a
+  "residual" on 25 of 32 crops, all of it photo). So the four photos that fired
+  read 36 px and 57 px, which *are* the probe's ceiling on those axes: the
+  measurement is saturated, not graded. Raising `--max-residual` past it would
+  disable the check rather than relax it, and every one of those crops is a
+  hairline of desk along one edge.
+- **A clipped white reference** never actually broke the correction. The worst
+  photo in the library blows 69% of its bright pixels and still keeps 103,000
+  usable border pixels — 129× the 800 the measurement treats as too few — and
+  lands on white 239.0. All six flagged photos landed within a point of target.
+  The failure this guards against is real but nothing in the library reaches it,
+  and it is a shooting fix (one stop down) rather than a processing one.
+
+The near-miss band is narrowed rather than demoted, because it is the check that
+caught both genuine problems. What changed is *when* it fires: a near-miss that
+`align_multi()` levelled and cropped is a good multi-print result whether or not
+the card guess was right (11 of them, all fine), while a near-miss **left whole**
+has had no geometry applied at all — so if it really was one card badly fitted,
+nothing downstream recovers it. `kind` still records `single?` either way, and
+`aspect`/`fill`/`solidity` are now written to `report.csv` for near-misses
+instead of only appearing inside the flag text.
+
+Between this and the glare rescue in § 3, `chekis/main/` goes from 22 files in
+`review/` to 3.
 
 ## The backs exception (not in the current code)
 

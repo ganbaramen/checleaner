@@ -669,8 +669,30 @@ function detectPrint(data, w, h) {
   const paper = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (ids.has(label[i])) paper[i] = 1;
 
+  // A second reading of the largest blob with any welded-on glare cut off, for
+  // singleFit() to fall back on. Not a replacement: see the comment on `trimmed`
+  // above for why the trimmed box may not simply decide single-vs-multi.
+  // countWindows() is re-run confined to the box so `solidity` is measured on
+  // what survives, the same closed-area trick as the untrimmed reading.
+  let sheenFree = null;
+  const box0 = sheenFreeBox(label, raw, edge, w, h, blobs[0]);
+  if (box0) {
+    // back through convexHull: clipToBox can hand back the opposite winding, and
+    // polyArea is signed -- the same trap `all` avoids by re-hulling its points
+    const clip = convexHull(clipToBox(hull, box0));
+    if (clip.length >= 6) {
+      const rc = minAreaRect(clip), ha = polyArea(clip);
+      const cw = countWindows(label, w, blobs[0].id, box0);
+      if (ha > 0 && rc.area > 0)
+        sheenFree = { quad: rc.quad, aspect: rc.aspect, fill: ha / rc.area,
+                      solidity: cw.closedArea / ha, blobs: nBlobs,
+                      windows: cw.windows };
+    }
+  }
+
   return { quad: rect.quad, aspect: rect.aspect, fill: hullArea / rect.area,
-           solidity: closedArea / hullArea, blobs: nBlobs, all, windows, paper };
+           solidity: closedArea / hullArea, blobs: nBlobs, all, windows, paper,
+           sheenFree };
 }
 
 /* Returns { windows, closedArea } for the largest paper blob -- port of
@@ -1364,8 +1386,23 @@ async function process(file) {
   const gmax = Math.max(...gain), gmin = Math.min(...gain);
   if (gmax > 2.2 || gmin < 1 / 2.2) flags.push(`strong correction (gain ${gain.map(v => v.toFixed(2)).join(", ")})`);
 
-  let isSingle = det.quad && det.blobs === 1 && det.aspect >= 1.53 && det.aspect <= 1.65
-                && det.fill >= 0.93 && det.solidity >= 0.97;
+  // Shape only. Kept as one function so the rescue below can reuse it, the way
+  // checleaner.py's single_gate() is shared by run() and tools/detect.py.
+  const shapeOk = d => d && d.quad && d.aspect >= 1.53 && d.aspect <= 1.65
+                    && d.fill >= 0.93 && d.solidity >= 0.97;
+  let fit = det;
+  let isSingle = det.quad && det.blobs === 1 && shapeOk(det);
+  // Desk glare welded onto a card by the segmentation close pulls the fitted
+  // rectangle out over desk -- one real photo reads aspect 1.434, fill 0.850
+  // against 1.58 / 0.99 once cut. So the sheen-free reading gets one try, and
+  // only when the *aspect* is what failed: a blob that was already card-shaped
+  // and failed on fill or solidity failed because its outline is ragged, which
+  // is what a pile of prints looks like from outside. Port of single_fit().
+  if (!isSingle && det.quad && det.blobs === 1 && det.sheenFree
+      && !(det.aspect >= 1.53 && det.aspect <= 1.65) && shapeOk(det.sheenFree)) {
+    isSingle = true;
+    fit = det.sheenFree;
+  }
   let nearMiss = det.quad && det.blobs === 1 && det.aspect >= 1.40 && det.aspect <= 1.90;
   // A blob enclosing many photo windows can't be one card, even if its outline
   // alone passes the tight test outright -- a tidy row of prints can (see
@@ -1374,8 +1411,16 @@ async function process(file) {
   if (isSingle || nearMiss) {
     if (det.windows >= MULTI_WINDOWS) { isSingle = false; nearMiss = false; }
   }
-  let out, info = { aspect: det.aspect, fill: det.fill, solidity: det.solidity,
-                    blobs: det.blobs, windows: det.windows };
+  // report the fit that will actually be cropped, so a rescued file's numbers
+  // aren't the raw blob's -- webdetect.py reads these back
+  let out, info = { aspect: fit.aspect, fill: fit.fill, solidity: fit.solidity,
+                    blobs: det.blobs, windows: det.windows,
+                    glareTrimmed: fit !== det,
+                    // the trimmed reading itself, so a sweep can calibrate the
+                    // rescue rather than only see which side of it a file fell
+                    sheenFree: det.sheenFree && { aspect: det.sheenFree.aspect,
+                      fill: det.sheenFree.fill, solidity: det.sheenFree.solidity,
+                      windows: det.sheenFree.windows } };
 
   if (isSingle) {
     setStatus("straightening and cropping…");
@@ -1390,7 +1435,7 @@ async function process(file) {
     const nv = Math.hypot(muA - 128, muB - 128) + 1e-6;
     const hue = [(muA - 128) / nv, (muB - 128) / nv];
 
-    const quadFull = det.quad.map(p => [p[0] / s, p[1] / s]);
+    const quadFull = fit.quad.map(p => [p[0] / s, p[1] / s]);
     const provW = 640, provH = Math.round(provW * ASPECT);
     const prov = warpQuad(fctx, full.width, full.height, quadFull, provW, provH, null);
     const ins = trimInsets(prov, provW, provH, hue, nv, muL);
