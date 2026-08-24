@@ -35,10 +35,15 @@ import base64
 import pathlib
 import argparse
 
+# A dev-only dependency, and an *optional* one: tests/test_web.py imports this
+# module to drive the page and skips itself when the import fails, so the failure
+# has to be catchable rather than a sys.exit at import time.
 try:
     from playwright.sync_api import sync_playwright
-except ImportError:                                   # a dev-only dependency
-    sys.exit("needs Playwright: pip install playwright && playwright install chromium")
+except ImportError:
+    sync_playwright = None
+
+NEEDS_PLAYWRIGHT = "needs Playwright: pip install playwright && playwright install chromium"
 
 PAGE = pathlib.Path(__file__).resolve().parent.parent / "checleaner.html"
 
@@ -142,6 +147,8 @@ def summarise(name: str, out: dict) -> dict:
 
 
 def run(files, save=None, quiet=False):
+    if sync_playwright is None:
+        raise RuntimeError(NEEDS_PLAYWRIGHT)
     rows, errs = [], []
     with sync_playwright() as p:
         browser = p.chromium.launch()
@@ -165,7 +172,10 @@ def run(files, save=None, quiet=False):
                 uri = page.evaluate(
                     "() => resultCanvas ? resultCanvas.toDataURL('image/jpeg', 0.9) : null")
                 if uri:
-                    dst = pathlib.Path(save) / name
+                    # always .jpg: what comes off the canvas is JPEG whatever the
+                    # source was called, and a PNG fixture saved as `.png` here
+                    # would be a JPEG lying about its name
+                    dst = pathlib.Path(save) / (pathlib.Path(name).stem + ".jpg")
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     dst.write_bytes(base64.b64decode(uri.split(",", 1)[1]))
         browser.close()
@@ -205,6 +215,8 @@ def main() -> int:
     ap.add_argument("--compare", metavar="BASELINE", help="print only what moved since this CSV")
     ap.add_argument("--save", metavar="DIR", help="write each corrected frame to DIR")
     args = ap.parse_args()
+    if sync_playwright is None:
+        sys.exit(NEEDS_PLAYWRIGHT)
 
     missing = [f for f in args.files if not os.path.isfile(f)]
     if missing:

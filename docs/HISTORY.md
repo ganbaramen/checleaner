@@ -192,7 +192,7 @@ is touched again without a test alongside it.
 Multi-print photos were balanced and left whole; `align_multi()` (method in
 `docs/PIPELINE.md` § 6) now also rotates the frame level and crops it centred
 on the prints when it safely can, at the original photo's aspect ratio.
-Python only for now — porting to `checleaner.html` is next steps item 2.
+Python only at the time; the port landed later the same day (see the "catches up on multi-print handling" entry).
 
 Test file: `023437053` (two touching prints,
 tilted ~1.5°) — verified both by inspecting the geometry directly (target and
@@ -1265,6 +1265,87 @@ output; recomputed on the two saved crops, 46 of its 64 cells differ, and it is
 byte-stable across repeat runs of the same build. That is the third blind spot
 this tool has had, each found by making a change on purpose and watching it
 report nothing.
+
+## 2026-08-24 — the phone app gets regression tests
+
+`checleaner.py` has had assertions since the start; `checleaner.html` has only
+ever had a sweep tool you diff by hand. `tests/test_web.py` closes that: the same
+synthetic fixtures, pushed through the real page under Playwright, with
+assertions on classification, crop geometry, the colour targets **measured on the
+app's own output canvas**, glare handling and orientation. 13 tests, ~35 s.
+
+A sweep diff and a test answer different questions. `webdetect.py --compare`
+reports what *moved*; it cannot tell you the app was already wrong, and it has
+been blind three separate times to changes that moved no field it tracked.
+
+### Pushing the fixtures through both implementations first
+
+Before writing a single assertion, every fixture went through `checleaner.py`
+and the page side by side. They agree almost everywhere, which is the useful
+result — and the one disagreement is worth having written down:
+
+| fixture | checleaner.py | checleaner.html |
+|---|---|---|
+| `single`, `single_upsidedown`, `single_glare`, `welded_glare` | single, 1800 × 2867 | same |
+| `grid` | single? 802 × 1070 | single? 796 × 1060 |
+| `pale_desk` | single? 1197 × 1676 | single? 1197 × 1676 |
+| `row2` | aligned 1396 × 1046 | aligned 1396 × 1046 |
+| `signed_row` | aligned 1042 × 782 | aligned 1038 × 778 |
+| `staggered_pile` | **aligned 1008 × 1344** | **left whole 1200 × 1920** |
+
+The pile is the known tilt gap: the app's `dominantTilt()` still averages blob
+`minAreaRect` angles, so on a staircase it reads the *arrangement's* angle
+(aspect 2.23) rather than the cards'; turning the frame by that opens blank
+corners no crop fits inside, and align declines. It is pinned as a test rather
+than skipped, so whoever writes the contour tracer finds it failing and updates
+the note instead of leaving a stale claim behind.
+
+### Every test was watched to fail
+
+Seven deliberate breaks in `checleaner.html`, and which test fired:
+
+| mutation | caught by |
+|---|---|
+| white target 238.8 → 225 | colour targets (2 tests) |
+| never flip an upside-down card | orientation |
+| solidity gate → 0 | classification, never-warps |
+| glare rescue disabled | 4 tests |
+| glare blob filter removed | stray-glare crop |
+| window backstop disabled | classification, never-warps, flush-grid |
+| paper-confined white anchor disabled | colour targets |
+
+Two of those found nothing on the first pass, and fixing that is most of what
+this entry is worth:
+
+- **The window backstop had no fixture at all.** Nothing in the set reached
+  `MULTI_WINDOWS`: the row has 2 windows, the pile 3, the grid 1. So
+  `make_flush_grid` — n × n cards laid flush — which is the one arrangement that
+  beats every shape test at once, because n rows of n cards is *exactly* a card's
+  aspect and touching borders leave no seams: it measures aspect 1.599, fill
+  1.000, solidity 1.000 in Python and 1.597 / 1.000 / 1.003 in the app. Only the
+  9 photo windows give it away. `checleaner.py` had the same blind spot, so it
+  got the same test.
+- **The never-warps test read the caption, not the pixels.** With the solidity
+  gate dropped, the grid *was* warped into a card — 1800 × 2867 — but the page
+  captioned it only "orientation uncertain", so the verdict-based assertion
+  sailed past. Now it asserts on the output's size, which is the fact; every
+  cropped single warps to the same canvas.
+
+One test also had to be honest about what it does *not* pin: disabling the
+app's paper-confined white anchor leaves the `pale_desk` fixture inside
+tolerance (the card fills enough of the frame that the brightest band is mostly
+paper either way) — it is the plain `single` fixture that moves, to 241.0. The
+docstring says so rather than claiming the confinement is under test.
+
+### Smaller things this needed
+
+`tools/webdetect.py` had `sys.exit` at import when Playwright was missing, which
+a test module can't catch cleanly; that moved into `main()` so the import raises
+and the suite skips. Its `--save` now always writes `.jpg`, since what comes off
+the canvas is JPEG whatever the source was called. And `make_single_with_glare`
+is now one call to a shared `add_glare()`, because the second glare fixture was
+written with a smaller ellipse that fell under the 3 %-of-frame blob threshold —
+so it silently tested nothing until the mutation run caught it.
 
 ## Known unfixable, so nobody re-litigates them
 

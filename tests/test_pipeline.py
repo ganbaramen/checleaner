@@ -89,20 +89,30 @@ def make_single(frame_w=1200, upside_down=False, seed=0):
     return img.astype(np.uint8)
 
 
-def make_single_with_glare(frame_w=1200, seed=0):
-    """A lone card plus a patch of specular desk glare: bright and near-neutral
-    enough to segment as its own blob, but blobby rather than rectangular."""
-    img = make_single(frame_w, seed=seed).astype(np.float32)
+def add_glare(img, seed=9):
+    """Add a patch of specular desk glare below whatever is in the frame.
+
+    An ellipse (fill = pi/4 ~ 0.785, right where real glare measured), big
+    enough to clear the 3%-of-frame blob threshold, and far enough below the
+    prints that the segmentation close can't bridge the two into one blob. So it
+    arrives as a *separate* blob, which is the interesting case: it can't fool
+    the single-card shape test, but align_multi crops around the union of every
+    blob, so one bright patch in a corner drags the crop out to cover desk
+    unless the glare filter drops it.
+    """
+    img = img.astype(np.float32)
     h, w = img.shape[:2]
-    # An ellipse (fill = pi/4 ~ 0.785, right where real glare measured), big
-    # enough to clear the 3%-of-frame blob threshold, and far enough below the
-    # card that the segmentation close can't bridge the two into one blob.
     cy, cx = h - int(h * 0.06), w // 2
     ry, rx = int(h * 0.05), int(w * 0.25)
     yy, xx = np.ogrid[:h, :w]
     blob = ((yy - cy) / ry) ** 2 + ((xx - cx) / rx) ** 2 <= 1.0
-    img[blob] = np.clip(BORDER + _noise((int(blob.sum()), 3), 2, seed + 9), 0, 255)
+    img[blob] = np.clip(BORDER + _noise((int(blob.sum()), 3), 2, seed), 0, 255)
     return img.astype(np.uint8)
+
+
+def make_single_with_glare(frame_w=1200, seed=0):
+    """A lone card plus a patch of desk glare that segments as its own blob."""
+    return add_glare(make_single(frame_w, seed=seed), seed=seed + 9)
 
 
 # A pale surface with a cool cast -- the shape of the failure the backs batch
@@ -245,6 +255,31 @@ def make_single_with_welded_glare(frame_w=1200, seed=0):
     alpha[(h - card_h) // 2:(h + card_h) // 2, x1 + gap:x1 + gap + int(w * 0.045)] = 1.0
     alpha = cv2.GaussianBlur(alpha, (0, 0), w * 0.012)   # soft edges: this is the tell
     img = img * (1 - alpha[:, :, None]) + BORDER * alpha[:, :, None]
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def make_flush_grid(frame_w=1500, n=3, seed=13):
+    """An n x n block of cards laid flush, with no gaps at all.
+
+    The one arrangement that beats every shape test outright: n rows of n cards
+    is n*card_h by n*card_w, so its *aspect is exactly a card's*, and with the
+    borders touching there are no seams for fill or solidity to catch either --
+    all three land at a clean card's numbers. Only the photo windows give it
+    away, one per print. This is what the window backstop exists for, and
+    nothing else in the fixture set reaches it.
+    """
+    frame_h = int(frame_w * 1.2)
+    img = np.clip(DESK + _noise((frame_h, frame_w, 3), 2, seed), 0, 255)
+    card_h = int(frame_h * 0.78 / n)
+    card_w = int(card_h / ASPECT)
+    oy, ox = (frame_h - n * card_h) // 2, (frame_w - n * card_w) // 2
+    for r in range(n):
+        for c in range(n):
+            y0, x0 = oy + r * card_h, ox + c * card_w
+            img[y0:y0+card_h, x0:x0+card_w] = np.clip(
+                BORDER + _noise((card_h, card_w, 3), 2, seed + r * n + c), 0, 255)
+            img[y0+int(card_h*.10):y0+int(card_h*.72),
+                x0+int(card_w*.14):x0+int(card_w*.86)] = WINDOW
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
@@ -625,6 +660,28 @@ def test_row_that_looks_like_a_card_is_caught_by_aspect_not_windows():
         f"aspect {d.aspect:.3f} no longer excludes this row (hi {DEFAULTS.aspect_hi})"
     assert count_windows(path) < DEFAULTS.card_windows, \
         "the window count is supposed to be unable to catch this one"
+
+
+def test_flush_grid_is_caught_only_by_its_windows():
+    """Nine cards laid flush beat every shape test at once -- aspect ~1.6, fill
+    1.0, solidity 1.0, a clean card's numbers on all three -- because n rows of n
+    cards is exactly a card's shape and touching borders leave no seams. The
+    window count is the only thing between this and being warped into one print,
+    which is what --card-windows exists for. Assert both halves: that the shape
+    really does pass, and that the count really does overrule it."""
+    path = _write(make_flush_grid())
+    try:
+        det = detect_print(path)
+        shape_ok, _ = single_fit(det, DEFAULTS)
+        wins = count_windows(path)
+        verdict = classify(det, DEFAULTS, wins)
+    finally:
+        os.unlink(path)
+    assert shape_ok, (f"fixture no longer beats the shape gate (aspect {det.aspect:.3f}, "
+                      f"fill {det.fill:.3f}, solidity {det.solidity:.3f})")
+    assert wins >= DEFAULTS.card_windows, \
+        f"{wins} windows, under --card-windows ({DEFAULTS.card_windows}): backstop can't fire"
+    assert verdict != "single", "nine flush cards were warped into one print"
 
 
 def test_window_backstop_is_stricter_for_a_confident_card_fit():

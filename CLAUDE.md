@@ -19,7 +19,8 @@ checleaner/
   docs/HISTORY.md        every batch processed, with before/after measurements
   tools/detect.py        fast detection-only preview for named files (no colour pass)
   tools/webdetect.py     the same, for checleaner.html — drives the page under Playwright
-  tests/test_pipeline.py regression tests: colour targets, aspect, orientation, single-vs-multi
+  tests/test_pipeline.py regression tests for checleaner.py
+  tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
   chekis/                source photos, gitignored — never committed
@@ -95,6 +96,28 @@ real photos are personal and gitignored — with an opt-in tier that also assert
 on `chekis/main/` when it's present and skips otherwise. Run it standalone
 (`python3 tests/test_pipeline.py`, needs only checleaner's own deps) or under
 `pytest tests/`. Run it after any change to the maths, not just the geometry.
+
+`tests/test_web.py` pins the *port*, and it needs to exist separately because
+passing Python tests say nothing about the app: its thresholds are calibrated
+against different pixels, its `solidity` is an approximation, and its tilt still
+comes off blob rectangles. It builds the same fixtures, pushes them through the
+real page under Playwright, and asserts on classification, crop geometry, the
+colour targets **measured on the app's own output canvas**, the glare handling
+and orientation. Same commands; it skips cleanly when Playwright isn't
+installed, so `pytest tests/` is safe either way — but it costs a browser launch
+and a page load per fixture (~35 s) against test_pipeline's pure numpy.
+
+Where the two implementations legitimately differ, `test_web.py` *pins the
+difference* rather than skipping it, so closing a gap fails the test and gets
+the note updated instead of leaving a stale claim in the docs.
+
+Both suites were checked by mutation: break the app's white target, its
+orientation flip, its solidity gate, its window backstop, its glare filter or
+its glare rescue, and confirm which test fires. Two didn't, and that is how
+`make_flush_grid` (nine cards laid flush — aspect 1.6, fill 1.0, solidity 1.0,
+caught by nothing but the window count) and the stray-glare row fixture came to
+exist. Do the same for any test added here; a test nobody has watched fail is
+not yet a test.
 
 The phone app is opened directly in a browser; there is no build step. To test
 it headlessly, use `tools/webdetect.py` — the JS counterpart to
@@ -226,16 +249,7 @@ directly.
 
 ## Next steps, roughly in order of value
 
-1. **Extend the regression tests to `checleaner.html`.** `checleaner.py` is
-   covered by `tests/test_pipeline.py` (synthetic fixtures asserting colour
-   targets, aspect, orientation, single-vs-multi); the phone app still has no
-   assertions. The driving half is already done — `tools/webdetect.py` loads the
-   page, feeds it files, and reports `kind`/`crop`/`size`/`white`/`gain`/
-   `aspect`/`fill`/`solidity`/`glare`/`windows`/`sig` — so what's left is feeding it the
-   synthetic fixtures and asserting on those numbers, rather than only diffing
-   two sweeps by hand. Optionally add real-photo golden numbers from
-   `docs/HISTORY.md` to the opt-in tier.
-2. **Give `checleaner.html` a face detector for content reorientation.**
+1. **Give `checleaner.html` a face detector for content reorientation.**
    Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
    (`countWindows()`), solidity, the desk-glare blob filter, the sheen trim
    (`sheenFreeBox()`), the lopsided-crop rule, and the paper-confined white
@@ -250,7 +264,7 @@ directly.
    face detector (e.g. onnxruntime-web + the same YuNet model), which also
    means solving how a `file://` page loads WASM offline (the hosted build has
    a service worker to lean on; see Hosting).
-3. **Give `checleaner.html` a contour tracer.** It has none, and two separate
+2. **Give `checleaner.html` a contour tracer.** It has none, and two separate
    gaps come out of that. Its `solidity` is approximated (`closedArea /
    hullArea`), so it reads a staggered row as a clean card —
    `153435918` measures 0.995/0.998 against Python's 0.863/0.793 —
@@ -263,7 +277,7 @@ directly.
    (`docs/PIPELINE.md` § 6) — which needs an outline to walk. One tracer plus
    a Douglas-Peucker pass fixes both; `TILT_COHERENCE` would then need its own
    sweep, since canvas decoding isn't pixel-identical to `cv2`'s.
-4. **Split multi-print photos into separate crops.** Still balanced as one
+3. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
    into one blob.
