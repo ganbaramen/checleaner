@@ -12,8 +12,9 @@ diffing `webdetect.py --compare` already supports:
 
 - The app's thresholds are calibrated separately from Python's (`MULTI_WINDOWS`,
   `CARD_EDGE_SHARP`; see docs/PIPELINE.md § 3), so "the Python tests pass" says
-  nothing about it. Its `solidity` is an approximation with no `findContours`
-  behind it, and its tilt still comes off blob rectangles.
+  nothing about it. Its segmentation doesn't even always produce the same blob
+  from the same photo -- a 43-px close bridges a sheen on one decoder's pixels
+  and not on the other's.
 - A sweep diff only reports what *moved*. It cannot tell you the app was already
   wrong, and it has been blind three separate times to changes that moved no
   field it tracked.
@@ -137,7 +138,7 @@ WEB_KINDS = {
     "row2":              "multi-aligned",
     "row2_glare":        "multi-aligned",
     "signed_row":        "multi-aligned",
-    "staggered_pile":    "multi-whole",     # see test_known_divergence...
+    "staggered_pile":    "multi-aligned",
     "grid":              "single?",
     "flush_grid":        "multi-aligned",    # shape says card; only windows disagree
 }
@@ -184,6 +185,17 @@ def test_web_flush_grid_is_caught_only_by_its_windows():
     # here means the crop path was taken -- which the assertion above has ruled out
     assert r["windows"] != "-" and int(r["windows"]) >= 6, \
         f"window count came back {r['windows']!r}; the backstop cannot fire on that"
+
+
+def test_web_solidity_is_a_real_ratio():
+    """A shape's area over its own convex hull's cannot exceed 1. The old
+    approximation could -- it divided a pixel *count* by a polygon area, and
+    three photos in the library measured over 1.0 -- which meant the number it
+    reported was not the quantity the threshold was set on. Cheap to assert, and
+    it fails the moment anyone reaches for a stand-in again."""
+    for name in WEB_KINDS:
+        sol = float(row(name)["solidity"])
+        assert 0 < sol <= 1.0 + 1e-6, f"{name}: solidity {sol}"
 
 
 def test_web_grid_is_caught_by_solidity():
@@ -336,23 +348,25 @@ def test_web_a_stray_glare_blob_does_not_drag_an_aligned_crop():
 
 # --------------------------------------------------- known port divergences
 
-def test_known_divergence_staggered_pile_is_left_whole():
-    """`checleaner.py` levels and crops this pile; the app leaves it whole.
+def test_web_levels_a_staggered_pile_by_its_cards():
+    """Three level prints dealt corner to corner. The blob's fitted rectangle
+    follows the staircase -- aspect 2.23 -- so a tilt taken from it turns the
+    frame by an angle no card in the photo has, which opens blank corners no
+    crop fits inside; the app used to decline outright and leave the frame whole.
+    Reading the tilt off the outline's straight runs instead, which are all card
+    borders, it now crops to the same 1008 x 1344 `checleaner.py` produces.
 
-    Not a bug in the app's crop logic -- its `dominantTilt()` still averages blob
-    minAreaRect angles, so on a staircase it reads the *arrangement's* angle
-    (2.23 aspect here) rather than the cards'. Turning the frame by that opens
-    blank corners no crop shape fits inside, and align declines. `checleaner.py`
-    reads the tilt off the prints' own edges instead (`_edge_dirs`), which the
-    app cannot do without a contour tracer -- the same gap that keeps its
-    solidity approximate. See the next steps in CLAUDE.md.
-
-    Pinned rather than skipped, so that whoever writes that tracer finds this
-    test failing and updates the note instead of leaving a stale claim behind.
+    This was a pinned divergence until the contour tracer landed. Keep it
+    asserting on the *shape*, not just on "it cropped": the failure it guards
+    against is a plausible-looking crop at the staircase's angle.
     """
-    assert row("staggered_pile")["kind"] == "multi-whole", (
-        "the app now crops the staggered pile -- if it grew a contour tracer, "
-        "update this test and the divergence note in docs/PIPELINE.md § 6")
+    r = row("staggered_pile")
+    assert r["kind"] == "multi-aligned", f"pile came back {r['kind']!r}"
+    assert float(r["aspect"]) > 2.0, \
+        "fixture no longer staggers enough for the blob rectangle to mislead"
+    assert abs(float(r["tilt"])) < 0.5, \
+        f"levelled by {r['tilt']}deg -- that is the staircase's angle, not a card's"
+    assert r["size"] == "1008x1344", f"crop came out {r['size']}, want 1008x1344"
 
 
 def test_pale_desk_is_not_croppable_by_either_implementation():

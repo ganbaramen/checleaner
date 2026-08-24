@@ -98,9 +98,9 @@ on `chekis/main/` when it's present and skips otherwise. Run it standalone
 `pytest tests/`. Run it after any change to the maths, not just the geometry.
 
 `tests/test_web.py` pins the *port*, and it needs to exist separately because
-passing Python tests say nothing about the app: its thresholds are calibrated
-against different pixels, its `solidity` is an approximation, and its tilt still
-comes off blob rectangles. It builds the same fixtures, pushes them through the
+passing Python tests say nothing about the app: it is a separate implementation
+whose thresholds are calibrated against different pixels, and whose segmentation
+does not always produce the same blob from the same photo. It builds the same fixtures, pushes them through the
 real page under Playwright, and asserts on classification, crop geometry, the
 colour targets **measured on the app's own output canvas**, the glare handling
 and orientation. Same commands; it skips cleanly when Playwright isn't
@@ -203,9 +203,14 @@ directly.
   second only refiles it. Do not collapse them: of 45 blobs passing the single
   gate, 44 are real cards reaching 7 windows and the 1 genuine pile also sits at
   7, so no shared threshold works. See `docs/PIPELINE.md` § 3. **This split is
-  Python-only** — `checleaner.html` keeps one threshold (6) because its
-  approximated solidity can't see a staggered row's notches, so the count is the
-  only thing stopping one being cropped as a card. Don't "finish the port".
+  Python-only, and the app cannot have it** — `checleaner.html` keeps one
+  threshold (6) because the window count is the only thing there stopping a real
+  row being cropped as a card, and the two classes interleave on it: at 6
+  windows sit one real row and one genuine single, at 7 the same pair again.
+  Raising the bar for confident fits frees a row into the card-warping path.
+  Don't "finish the port". (This used to be blamed on the app's approximated
+  solidity; it isn't. See the 2026-08-24 contour-tracer entry in
+  `docs/HISTORY.md` for what the real obstacle is.)
 - **The sheen-free box is a second opinion in `detect_print`, never a
   replacement.** `single_fit()` retries the single-card gate on it only when the
   blob's *aspect* was what failed — a glare appendage distorts the fitted
@@ -251,11 +256,13 @@ directly.
 
 1. **Give `checleaner.html` a face detector for content reorientation.**
    Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
-   (`countWindows()`), solidity, the desk-glare blob filter, the sheen trim
-   (`sheenFreeBox()`), the lopsided-crop rule, and the paper-confined white
-   anchor are all now ported (see `docs/PIPELINE.md` §§ 1, 3, 6) — window
-   counts, `MULTI_WINDOWS` and `CARD_EDGE_SHARP` are calibrated separately from
-   Python's, since canvas image decoding isn't pixel-identical to `cv2`'s.
+   (`countWindows()`), contour-traced solidity, the edge-direction tilt
+   (`traceContour()` → `edgeDirs()` → `circularTilt()`), the desk-glare blob
+   filter, the sheen trim (`sheenFreeBox()`), the lopsided-crop rule, and the
+   paper-confined white anchor are all now ported (see `docs/PIPELINE.md`
+   §§ 1, 3, 6) — window counts, `MULTI_WINDOWS` and `CARD_EDGE_SHARP` are
+   calibrated separately from Python's, since canvas image decoding isn't
+   pixel-identical to `cv2`'s.
    Desk *matching* has never existed in the app and can't: the target is a
    folder-wide median, and the app sees one photo at a time. What's still
    desktop-only besides that is `content_rotation()`: the app
@@ -264,20 +271,7 @@ directly.
    face detector (e.g. onnxruntime-web + the same YuNet model), which also
    means solving how a `file://` page loads WASM offline (the hosted build has
    a service worker to lean on; see Hosting).
-2. **Give `checleaner.html` a contour tracer.** It has none, and two separate
-   gaps come out of that. Its `solidity` is approximated (`closedArea /
-   hullArea`), so it reads a staggered row as a clean card —
-   `153435918` measures 0.995/0.998 against Python's 0.863/0.793 —
-   which leaves the window count as the only thing keeping such a row out of
-   the single-card path, which is why `MULTI_WINDOWS` can't be split the way
-   Python's now is, and why two genuine singles come out levelled rather than
-   cropped (`docs/PIPELINE.md` § 3). And `dominantTilt()` still averages blob
-   `minAreaRect` angles, so a staggered pile levels by its staircase rather
-   than its cards, the way `checleaner.py` did before `_edge_dirs()`
-   (`docs/PIPELINE.md` § 6) — which needs an outline to walk. One tracer plus
-   a Douglas-Peucker pass fixes both; `TILT_COHERENCE` would then need its own
-   sweep, since canvas decoding isn't pixel-identical to `cv2`'s.
-3. **Split multi-print photos into separate crops.** Still balanced as one
+2. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
    into one blob.

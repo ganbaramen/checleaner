@@ -139,6 +139,14 @@ const CROP_MARGIN = 0.04;
 const CROP_MARGIN_STEPS = 4;
 // Rows of clean paper that end a run of desk in trimInsets' edge scan. See there.
 const TRIM_GAP = 6;
+// Shortest straight run of a blob's outline that counts as a card edge rather
+// than a jag in the mask. Same 8 px as checleaner.py: both measure on a frame
+// scaled to 1100 on its long edge, so the number transfers directly.
+const EDGE_MIN_LEN = 8;
+// How much the outline's straight runs must agree on one angle (mod 90) before
+// that angle is taken as the frame's tilt. Calibrated on this decoder, not
+// shared with Python's -- see docs/PIPELINE.md § 6.
+const TILT_COHERENCE = 0.95;
 // How far past the blob to look for the prints' true paper extent.
 const PAPER_HALO = 0.20;
 // Least a crop's smaller margin may be as a fraction of its larger one, on the
@@ -625,9 +633,16 @@ function detectPrint(data, w, h) {
   // as its rectangle: a minAreaRect is *rotated*, so once the frame is turned
   // its corners bound far more than the prints do, and a crop built on them can
   // cut a print in half. The outline never leaves the prints.
-  let all = trimmed.map(pts => {
+  // The traced outer boundary of each blob, which is where solidity and the
+  // frame's tilt both come from now. Per blob rather than for the largest only,
+  // because align() levels a photo by every print in it.
+  const rings = blobs.map(bl => pairsOf(traceContour(i => label[i] === bl.id, w, h, bl.bbox)));
+  let all = trimmed.map((pts, i) => {
     const hu = convexHull(pts), rc = minAreaRect(hu);
-    return { quad: rc.quad, hull: hu, area: rc.area, fill: polyArea(hu) / rc.area };
+    return { quad: rc.quad, hull: hu, area: rc.area, fill: polyArea(hu) / rc.area,
+             // untrimmed on purpose, matching detect_all_prints: the sheen cut
+             // serves the crop's extent, and a card's edges are its edges
+             edges: edgeDirs(rings[i]) };
   });
   // Desk glare segments as its own bright, near-neutral blob, and align() crops
   // around the *union* of these -- so one bright patch in a corner drags the crop
@@ -640,18 +655,20 @@ function detectPrint(data, w, h) {
   if (cards.length) all = cards;
   const hull = convexHull(blobs[0].pts);
   const rect = minAreaRect(hull);
-  const { windows, closedArea } = countWindows(label, w, blobs[0].id, blobs[0].bbox);
+  const { windows } = countWindows(label, w, blobs[0].id, blobs[0].bbox);
   const hullArea = polyArea(hull);
   // fill measured on the hull, so a frame with an unfilled middle still scores 1.
-  // solidity is the blob's own OUTER-boundary area over its hull area -- not raw
-  // pixel count, which would undercount every card (the photo window is a hole
-  // in the paper mask, not paper itself). closedArea already fills that hole
-  // (countWindows finds it the same way), giving the area cv2.contourArea would
-  // trace on the outer boundary. A real card's border has no seams, so its outer
-  // boundary already *is* its hull (solidity ~= 1.0); a tight grid of several
-  // cards leaves notches at the seams that only the hull smooths over, so it
-  // measures noticeably lower -- catches a flush grid that fill (and aspect)
-  // alone can pass outright. Port of checleaner.py's solidity check.
+  // solidity is the traced outer boundary's own area over its hull's -- the
+  // literal cv2.contourArea(contour) / cv2.contourArea(hull) checleaner.py uses.
+  // A real card's border has no seams, so its outer boundary already *is* its
+  // hull and solidity lands at 1.0; a grid or a staggered row leaves notches at
+  // the seams that only the hull smooths over, and measures well below.
+  //
+  // This used to be approximated from pixel counts (closedArea / hullArea),
+  // mixing a count with a polygon area -- it could exceed 1.0, and it could not
+  // see a staggered row's notches at all: 153435918 read 0.998 here against
+  // Python's 0.793, which left the window count as the only thing keeping such
+  // a row out of the card path.
   // Count card-shaped blobs, not every bright one. A specular highlight on the
   // desk survives segmentation as its own component, and any second component
   // used to break the "exactly one blob" test -- routing flawless single cards
@@ -674,30 +691,39 @@ function detectPrint(data, w, h) {
   // A second reading of the largest blob with any welded-on glare cut off, for
   // singleFit() to fall back on. Not a replacement: see the comment on `trimmed`
   // above for why the trimmed box may not simply decide single-vs-multi.
-  // countWindows() is re-run confined to the box so `solidity` is measured on
-  // what survives, the same closed-area trick as the untrimmed reading.
+  // The blob is re-traced *clipped to the box* rather than measured off the
+  // clipped hull: a hull is convex, so its solidity is 1 by construction and
+  // would wave anything through. Same shape checleaner.py measures in
+  // _trimmed_detection().
   let sheenFree = null;
   const box0 = sheenFreeBox(label, raw, edge, w, h, blobs[0]);
   if (box0) {
-    // back through convexHull: clipToBox can hand back the opposite winding, and
-    // polyArea is signed -- the same trap `all` avoids by re-hulling its points
-    const clip = convexHull(clipToBox(hull, box0));
-    if (clip.length >= 6) {
-      const rc = minAreaRect(clip), ha = polyArea(clip);
-      const cw = countWindows(label, w, blobs[0].id, box0);
+    const [gx0, gy0, gx1, gy1] = box0;
+    const insideBox = i => {
+      if (label[i] !== blobs[0].id) return false;
+      const x = i % w, y = (i / w) | 0;
+      return x >= gx0 && x <= gx1 && y >= gy0 && y <= gy1;
+    };
+    const tring = pairsOf(traceContour(insideBox, w, h,
+                                       [gx0, gy0, Math.min(gx1, w - 1), Math.min(gy1, h - 1)]));
+    if (tring.length >= 3) {
+      const thull = convexHull(tring.flat()), rc = minAreaRect(thull);
+      const ha = polyArea(thull), ca = polyArea(tring);
       if (ha > 0 && rc.area > 0)
         sheenFree = { quad: rc.quad, aspect: rc.aspect, fill: ha / rc.area,
-                      solidity: cw.closedArea / ha, blobs: nBlobs,
-                      windows: cw.windows };
+                      solidity: ca / ha, blobs: nBlobs,
+                      windows: countWindows(label, w, blobs[0].id, box0).windows };
     }
   }
 
+  const ring = rings[0], ringHull = convexHull(ring.flat());
+  const solidity = ringHull.length >= 3 && polyArea(ringHull) > 0
+                 ? polyArea(ring) / polyArea(ringHull) : 1;
   return { quad: rect.quad, aspect: rect.aspect, fill: hullArea / rect.area,
-           solidity: closedArea / hullArea, blobs: nBlobs, all, windows, paper,
-           sheenFree };
+           solidity, blobs: nBlobs, all, windows, paper, sheenFree };
 }
 
-/* Returns { windows, closedArea } for the largest paper blob -- port of
+/* How many photo windows a paper blob encloses -- port of
    checleaner.py's count_windows(). Several prints laid over each other merge
    their white borders into one blob invisibly (white paper on white paper
    leaves no seam for fill to catch), but each print's own picture stays dark
@@ -706,12 +732,6 @@ function detectPrint(data, w, h) {
    blouse, say) bridges it to the border; several merged prints run much
    higher. See checleaner.py's docstring for the numbers MULTI_WINDOWS is
    built on -- the same threshold is used here.
-
-   closedArea (paper pixels plus every enclosed hole) is a side effect of the
-   same flood fill, reused by detectPrint() to compute solidity: it is the
-   area an outer-boundary trace would enclose, which cv2.contourArea gets
-   directly from cv2.findContours(..., RETR_EXTERNAL) but this port has to
-   derive by filling the holes back in.
 
    The flood fill seeds from a padded border, not the bbox corner: the corner
    of a tilted blob's own bbox can be *inside* the blob, and seeding there
@@ -738,11 +758,8 @@ function countWindows(label, w, blobId, bbox) {
     if (y < ph - 1 && notPaper[i + pw] === 1 && filled[i + pw] !== 2) { filled[i + pw] = 2; stack[top++] = i + pw; }
   }
   const holes = new Uint8Array(pw * ph);
-  let closedArea = 0;               // paper pixels + every enclosed hole -- the
-  for (let i = 0; i < pw * ph; i++) {   // area an outer-boundary trace would enclose
+  for (let i = 0; i < pw * ph; i++)
     holes[i] = (notPaper[i] === 1 && filled[i] !== 2) ? 1 : 0;
-    if (notPaper[i] === 0 || holes[i]) closedArea++;
-  }
 
   const seen = new Uint8Array(pw * ph);
   const areaMin = 0.005 * bw * bh;
@@ -761,7 +778,7 @@ function countWindows(label, w, blobId, bbox) {
     }
     if (count > areaMin) n++;
   }
-  return { windows: n, closedArea };
+  return { windows: n };
 }
 
 function polyArea(poly) {
@@ -816,6 +833,147 @@ function minAreaRect(hull) {
 }
 
 /* homography mapping quad -> [0,0],[0,H],[W,H],[W,0], solved as an 8x8 system */
+/* ---------------------------------------------------------- contour tracing */
+/* Ported from what cv2.findContours(..., RETR_EXTERNAL) gives checleaner.py.
+   Everything below exists because the app had no ordered outline: `solidity`
+   had to be approximated from pixel counts, and the frame's tilt had to come
+   off a fitted rectangle. Both were wrong in the same way -- they cannot see
+   the notches a staggered row leaves in its own boundary. */
+
+// Moore neighbourhood, clockwise from east. y grows downward, so this really is
+// clockwise on screen.
+const TRACE_DX = [1, 1, 0, -1, -1, -1, 0, 1];
+const TRACE_DY = [0, 1, 1, 1, 0, -1, -1, -1];
+
+/* The ordered outer boundary of a region, as a flat [x, y, x, y, ...] ring.
+
+   `inside(i)` says whether pixel index i belongs; `bbox` is where to look for a
+   starting pixel. Moore-neighbourhood tracing: walk to the first neighbour that
+   is inside, scanning clockwise from wherever we arrived, which keeps the
+   region on the same hand throughout and so follows the *outer* boundary only --
+   holes are not traced, exactly as RETR_EXTERNAL does not return them.
+
+   Termination is on the (pixel, arrival direction) state repeating rather than
+   on returning to the start pixel: a boundary one pixel wide is walked twice,
+   once along each side, and passes back through its own start halfway round.
+*/
+function traceContour(inside, w, h, [bx0, by0, bx1, by1]) {
+  let sx = -1, sy = -1;
+  for (let y = Math.max(0, by0); y <= Math.min(h - 1, by1) && sx < 0; y++)
+    for (let x = Math.max(0, bx0); x <= Math.min(w - 1, bx1); x++)
+      if (inside(y * w + x)) { sx = x; sy = y; break; }
+  if (sx < 0) return [];
+  const out = [sx, sy];
+  // the first pixel in raster order has nothing to its west, so start as if we
+  // had arrived from there
+  let cx = sx, cy = sy, dir = 4;
+  const seen = new Set();
+  for (;;) {
+    const state = ((cy * w + cx) * 8) + dir;
+    if (seen.has(state)) break;
+    seen.add(state);
+    let stepped = false;
+    for (let k = 1; k <= 8; k++) {
+      const d = (dir + k) & 7;
+      const nx = cx + TRACE_DX[d], ny = cy + TRACE_DY[d];
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h || !inside(ny * w + nx)) continue;
+      cx = nx; cy = ny; dir = (d + 4) & 7;
+      stepped = true;
+      break;
+    }
+    if (!stepped) break;                       // a single isolated pixel
+    out.push(cx, cy);
+  }
+  // the ring closes on its own start; drop the repeat so polyArea doesn't see
+  // a zero-length edge
+  if (out.length >= 4 && out[out.length - 2] === sx && out[out.length - 1] === sy)
+    out.length -= 2;
+  return out;
+}
+
+const pairsOf = flat => {
+  const out = [];
+  for (let i = 0; i < flat.length; i += 2) out.push([flat[i], flat[i + 1]]);
+  return out;
+};
+
+/* Douglas-Peucker on one open chain, endpoints always kept. */
+function dpSimplify(chain, eps) {
+  if (chain.length < 3) return chain.slice();
+  const keep = new Uint8Array(chain.length);
+  keep[0] = keep[chain.length - 1] = 1;
+  const stack = [[0, chain.length - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop();
+    if (j <= i + 1) continue;
+    const ax = chain[i][0], ay = chain[i][1];
+    const dx = chain[j][0] - ax, dy = chain[j][1] - ay;
+    const len = Math.hypot(dx, dy) || 1;
+    let far = -1, best = eps;
+    for (let k = i + 1; k < j; k++) {
+      const d = Math.abs((chain[k][0] - ax) * dy - (chain[k][1] - ay) * dx) / len;
+      if (d > best) { best = d; far = k; }
+    }
+    if (far < 0) continue;
+    keep[far] = 1;
+    stack.push([i, far], [far, j]);
+  }
+  return chain.filter((_, i) => keep[i]);
+}
+
+/* cv2.approxPolyDP(..., closed=true) for a ring.
+
+   A closed curve has no endpoints to anchor the recursion on, and picking one
+   arbitrarily leaves a kink there. Cut the ring at its two most distant points
+   first and simplify the halves, which is what OpenCV does in effect. */
+function approxPoly(ring, eps) {
+  if (ring.length < 4) return ring.slice();
+  let far = 0, best = -1;
+  for (let i = 1; i < ring.length; i++) {
+    const d = (ring[i][0] - ring[0][0]) ** 2 + (ring[i][1] - ring[0][1]) ** 2;
+    if (d > best) { best = d; far = i; }
+  }
+  const a = dpSimplify(ring.slice(0, far + 1), eps);
+  const b = dpSimplify(ring.slice(far).concat([ring[0]]), eps);
+  return a.concat(b.slice(1, -1));
+}
+
+/* (angle mod 90, length) for every straight run of an outline. Port of
+   checleaner.py's _edge_dirs(); see docs/PIPELINE.md § 6 for why a card's own
+   edges beat any rectangle fitted to the blob they belong to. */
+function edgeDirs(ring) {
+  const poly = approxPoly(ring, 2.0), out = [];
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (len < EDGE_MIN_LEN) continue;
+    let deg = (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI) % 90;
+    if (deg < 0) deg += 90;
+    out.push([deg, len]);
+  }
+  return out;
+}
+
+/* Weighted circular mean of angles that live mod 90, and how much they agree.
+
+   Quadrupling is the wraparound fix: a rectangle looks identical every 90
+   degrees, so +44 and -44 are two degrees apart and a plain mean would land on
+   0. The resultant length falls out of the same arithmetic and says how tightly
+   the inputs cluster -- 1 when all parallel, near 0 when they scatter. Port of
+   checleaner.py's _circular_tilt(). */
+function circularTilt(dirs) {
+  let sn = 0, cs = 0, tot = 0;
+  for (const [deg, len] of dirs) {
+    const wt = len * len, t4 = deg * 4 * Math.PI / 180;
+    sn += wt * Math.sin(t4); cs += wt * Math.cos(t4); tot += wt;
+  }
+  if (!tot) return null;
+  sn /= tot; cs /= tot;
+  let deg = (Math.atan2(sn, cs) * 180 / Math.PI) / 4;
+  deg = ((deg % 90) + 90) % 90;
+  return { tilt: deg >= 45 ? deg - 90 : deg, agree: Math.hypot(sn, cs) };
+}
+
 function homography(src, dst) {
   const A = [], b = [];
   for (let i = 0; i < 4; i++) {
@@ -1004,10 +1162,9 @@ function rotate90(img, cw) {
 
 /* -------------------------------------------------- multi-print alignment */
 /* Port of checleaner.py's align_multi(): level and centre a photo of several
-   prints. A rectangle reads the same every 90 degrees, so a blob's raw long-edge
-   angle can't be averaged directly -- fold each tilt into [-45, 45) and take an
-   area-weighted circular mean (the angle-quadrupling trick, since tilt has
-   period 90 not 360) so a couple of small false blobs can't outvote the prints.
+   prints. A rectangle reads the same every 90 degrees, so no angle here can be
+   averaged directly -- everything folds into [-45, 45) and averages on the
+   circle (circularTilt).
 
    Note: this only *levels* the frame. It can't tell up from down or a quarter
    turn -- that needs to read print content, which the desktop tool does with a
@@ -1018,7 +1175,29 @@ function tiltDeg(quad) {
   let deg = ((Math.atan2(vy, vx) * 180 / Math.PI) % 90 + 90) % 90;
   return deg >= 45 ? deg - 90 : deg;
 }
+
+/* How far off level the prints in this frame are. Port of _dominant_tilt().
+
+   First choice is the prints' own edges, weighted by length squared: squared
+   because the question is which direction the outline *commits* to, and one
+   400 px card border is better evidence of that than fifty 8 px jags adding up
+   to the same total. Card edges survive what ruins a fitted rectangle --
+   staggering turns the pile's outline without bending a single card border, and
+   a bridged-on sheen wanders rather than running straight, so it breaks into
+   short runs the weighting drops.
+
+   Used only when the runs agree (TILT_COHERENCE). Below that the edges really
+   do disagree, which means a card keystoned steeply enough that its borders
+   aren't two pairs of parallels any more, so fall through to the blob
+   rectangles rather than act on it. Python has a third rung between the two
+   (photo-window angles); this port doesn't, and doesn't need one -- windows
+   only ever mattered there because the rectangles were being reached for so
+   often. */
 function dominantTilt(dets) {
+  const dirs = [];
+  for (const d of dets) if (d.edges) dirs.push(...d.edges);
+  const fromEdges = circularTilt(dirs);
+  if (fromEdges && fromEdges.agree >= TILT_COHERENCE) return fromEdges.tilt;
   let sn = 0, cs = 0;
   for (const d of dets) {
     const t4 = tiltDeg(d.quad) * 4 * Math.PI / 180;
@@ -1507,7 +1686,12 @@ async function process(file) {
     const detsFull = det.all.map(d => ({
       quad: d.quad.map(p => [p[0] / s, p[1] / s]),
       hull: d.hull.map(p => [p[0] / s, p[1] / s]),
-      area: d.area / (s * s) }));
+      area: d.area / (s * s),
+      // carried through unscaled: only the *angles* decide the tilt, and the
+      // length weighting is relative, so scaling every run by the same 1/s
+      // changes neither. EDGE_MIN_LEN was applied at the analysis scale on
+      // purpose, where it matches checleaner.py's.
+      edges: d.edges }));
     const aligned = alignMulti(cc, detsFull);
     if (aligned) {
       out = aligned.img;

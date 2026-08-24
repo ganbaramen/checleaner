@@ -233,10 +233,11 @@ Three details are load-bearing:
   against 4.7).
 
 The rescue is ported too: `detectPrint()` returns a `sheenFree` reading of the
-largest blob, with `countWindows()` re-run confined to the box so its
-approximated solidity is measured on what survives. `153435918` is untouched
-there because in the JS it never fails on shape at all — its approximated
-solidity reads 0.998 and only the window count holds it back. Watch the winding:
+largest blob, re-traced clipped to the box so its solidity is measured on what
+survives — off the *clipped hull* it would be 1 by construction, since a hull is
+convex, and would wave anything through. `153435918` is untouched there because
+in the JS it never fails on shape at all: its solidity reads 0.994 and only the
+window count holds it back. Watch the winding:
 `clipToBox()` can return the opposite one and `polyArea` is signed, so the
 clipped points go back through `convexHull()` before being measured, the same
 thing the crop outlines already do.
@@ -354,10 +355,20 @@ for review rather than being forced through. The count lands in `report.csv`'s
 and `countWindows()`), but not with identical numbers, because the two
 implementations don't decode/downscale a JPEG the same way (`cv2.resize` with
 `INTER_AREA` vs a canvas `drawImage`, even with `imageSmoothingQuality:
-"high"`) and JS has no `cv2.findContours(..., RETR_EXTERNAL)` to hand it a raw
-contour area — `solidity` there is `closedArea / hullArea`, where `closedArea`
-reuses `countWindows()`'s own hole-fill (paper pixels plus every enclosed
-hole) to approximate what an external contour would enclose. On a full sweep
+"high"`).
+
+`solidity` there is now the same quantity Python measures, on the app's own
+`traceContour()` — a Moore-neighbourhood walk of the blob's outer boundary,
+which is what `cv2.findContours(..., RETR_EXTERNAL)` returns. It replaced an
+approximation (`closedArea / hullArea`, reusing `countWindows()`'s hole-fill to
+stand in for the contour's enclosed area), and the honest result is that the
+approximation was *accurate*: across 126 photos no file moved by more than
+0.007. What it could not do was stay in range — being a pixel count over a
+polygon area, it read above 1.0 on three files, so the number the threshold was
+set on wasn't quite the quantity it named. Worth having exact; not worth
+expecting a reclassification from.
+
+On a full sweep
 of `chekis/main/`, JS's window counts run a bit lower than Python's for the
 same photos, so `MULTI_WINDOWS` is calibrated separately for JS (**6**, not
 7) against JS's own worst-genuine-single measurement, not copied from
@@ -367,23 +378,32 @@ solidity to ~0.56 and demoting it to a flagged near-miss instead of an
 auto-crop — accepted as the safe failure direction (a flag costs a look;
 a wrongly-accepted grid costs a mangled photo), not chased further.
 
-**The two-threshold split above is Python-only, on purpose.** In Python a
-staggered row is thrown out by shape before the count is consulted, so raising
-the bar for confident fits costs nothing. In JS it isn't: the approximated
-solidity cannot see the notches in a staggered row. `153435918`, three
-prints laid unevenly, reads fill 0.863 / solidity 0.793 to Python and **0.995 /
-0.998** to the app — it sails through the JS shape gate, and the window count is
-the only thing between it and being warped into one card.
+**The two-threshold split above is Python-only, and the app cannot have it.** In
+Python a staggered row is thrown out by shape before the count is consulted, so
+raising the bar for confident fits costs nothing. In JS it isn't, and the reason
+is not what it looks like. `153435918`, three prints laid unevenly, reads fill
+0.863 / solidity 0.793 to Python and **0.995 / 0.994** to the app — and the app
+is not wrong. Its blob for that photo *is* a clean rectangle. Python's is not,
+because Python's segmentation welds a patch of desk sheen onto it (the blob's
+bbox starts at 0,0; `_sheen_free_bbox` finds one sheen piece of 11 k px at 323
+mean Scharr), and it is that appendage, not the staggering, that costs the shape
+test. The gap between the two masks is a pixel or two inside a 43-px close: the
+same close bridges the sheen on one decoder's pixels and not on the other's.
+
+This was blamed on the app's approximated solidity for a while, and writing a
+real contour tracer (2026-08-24) settled it: with `cv2.contourArea(contour) /
+cv2.contourArea(hull)` computed literally, the file still measures 0.994. No
+solidity, however exact, rejects a blob that is genuinely rectangular.
 
 Measured over `main/` + `rancheki/`, the four files that pass the full JS single
 gate interleave completely:
 
 | file | aspect | fill | solidity | windows | truth |
 |---|---|---|---|---|---|
-| `153435918` | 1.576 | 0.995 | 0.998 | 6 | **multi** |
-| `033323480` | 1.579 | 0.997 | 0.999 | 7 | single |
-| `073350228` | 1.585 | 0.996 | 0.991 | 6 | single |
-| `012024586` | 1.639 | 0.994 | 0.994 | 7 | **multi** |
+| `153435918` | 1.576 | 0.995 | 0.994 | 6 | **multi** |
+| `033323480` | 1.579 | 0.997 | 0.996 | 7 | single |
+| `073350228` | 1.585 | 0.996 | 0.988 | 6 | single |
+| `012024586` | 1.639 | 0.994 | 0.992 | 7 | **multi** |
 
 No threshold on any recorded metric separates those rows, and aspect can't
 help either (the multis bracket the singles). So `MULTI_WINDOWS` stays 6 for
@@ -505,11 +525,13 @@ The **levelling, best-fit crop, and margin recentre** in this section are all
 ported to `checleaner.html` (`alignMulti()` + `paperBbox()`, `CROP_ASPECTS`
 list, hull-based extent, slack-capped nudge, the lopsided rule and the
 rationed margin), as is the glare filter on secondary blobs (`PRINT_FILL`) and
-the sheen trim of § 3 (`sheenFreeBox()`). The **edge-direction tilt** is not:
-the app has no contour tracer (its solidity is approximated for the same
-reason), so `dominantTilt()` still averages blob `minAreaRect` angles and can
-be fooled by a staggered pile the way `checleaner.py` no longer is. Writing
-that tracer would fix both at once — see the next steps in `CLAUDE.md`. The **content reorientation** half
+the sheen trim of § 3 (`sheenFreeBox()`), and — since 2026-08-24 — the
+**edge-direction tilt**, on the app's own contour tracer (`traceContour()`, a
+Moore-neighbourhood walk, then `approxPoly()` and `edgeDirs()`). Measured over
+`main/` + `rancheki/`, the app's levelling now agrees with `checleaner.py`'s to
+a mean of **0.058°** across the 65 photos both align, worst case 0.16°; before
+it was 0.154° mean and 0.51° worst, and a staggered pile was declined outright
+because the staircase's angle opened blank corners no crop could fit. The **content reorientation** half
 below is desktop-only — it needs a face model the offline single-file app
 can't ship — so the phone app instead offers manual ⟲/⟳/180° rotate buttons to
 stand a levelled result upright by hand. One consequence: `checleaner.html`

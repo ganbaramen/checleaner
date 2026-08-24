@@ -19,6 +19,12 @@ reclassifies is to push every photo through the real page.
 moved, which is what "sweep and check what reclassifies" means for the JS half.
 A full sweep of `chekis/main/` takes a few minutes.
 
+Don't edit `checleaner.html` while a sweep is running. Each file is a fresh page
+load, so a mid-run edit is picked up from that point on and the CSV ends up half
+one build and half another -- which reads exactly like a real reclassification.
+(Cost an hour once, chasing a solidity that had "regressed" to 1.000 on twenty
+files: a mutation-testing loop had been rewriting the page underneath it.)
+
 Needs Playwright (`pip install playwright && playwright install chromium`),
 which the pipeline itself does not -- this is a dev tool, not part of a run.
 
@@ -111,15 +117,19 @@ def summarise(name: str, out: dict) -> dict:
         m = re.search(pattern, stats)
         return m.group(1) if m else default
 
+    # Read the page's own state, not its prose. The captions were the only thing
+    # available before `lastDetection` existed, and they lie by omission: a crop
+    # that also raises "orientation uncertain" shows *only* that warning, so two
+    # cleanly cropped singles were being filed as "other".
     if "couldn't find a white border" in status:
         kind = "no-blob"
-    elif "cropped, straightened" in flags:
+    elif det.get("cropped"):
         kind = "single"
     elif "couldn't fit one card" in flags:
         kind = "single?"
-    elif "levelled" in flags:
+    elif det.get("aligned"):
         kind = "multi-aligned"
-    elif "left whole" in flags:
+    elif det:
         kind = "multi-whole"
     else:
         kind = "other"

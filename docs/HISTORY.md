@@ -1347,6 +1347,86 @@ is now one call to a shared `add_glare()`, because the second glare fixture was
 written with a smaller ellipse that fell under the 3 %-of-frame blob threshold —
 so it silently tested nothing until the mutation run caught it.
 
+## 2026-08-24 — checleaner.html gets a contour tracer
+
+The app had no ordered outline, and two things were built around the gap: its
+`solidity` was approximated from pixel counts, and its tilt came off a fitted
+rectangle. `traceContour()` (Moore-neighbourhood walk of a blob's outer
+boundary, the same thing `cv2.findContours(..., RETR_EXTERNAL)` returns) plus
+`dpSimplify()`/`approxPoly()` (Douglas-Peucker, `cv2.approxPolyDP` with
+`closed=true`) close it, and `edgeDirs()` + `circularTilt()` are then direct
+ports of `_edge_dirs()` and `_circular_tilt()`.
+
+Both halves landed, but not with the payoffs the next-steps note predicted.
+
+### The tilt: this is where the value was
+
+`dominantTilt()` now reads the angle off the prints' own edges, gated on
+`TILT_COHERENCE`, falling back to the blob rectangles below it. Measured against
+`checleaner.py`'s `align_tilt` over the 65 photos of `main/` + `rancheki/` that
+both implementations align:
+
+| | mean \|JS − Python\| | worst |
+|---|---|---|
+| before | 0.154° | 0.510° |
+| after | **0.058°** | **0.160°** |
+
+34 files moved closer, 2 moved further (by 0.12° and 0.16°, noise). The
+`staggered_pile` fixture — pinned in `tests/test_web.py` as a known divergence
+two days ago — now crops to **1008 × 1344**, the same shape `checleaner.py`
+produces, instead of being declined because the staircase's angle opened blank
+corners no crop could fit. That test is now an agreement test.
+
+Three files changed verdict on the sweep. `222119103` gained a crop, matching
+Python. `234344460` and `002059642` lost one — but both were cropping *two
+pixels* off their source (2974 × 3965 from 2976 × 3969), so "left whole" is the
+same picture; they sit right on `place()`'s edge and a hundredth of a degree
+tips them either way.
+
+One wiring trap cost an hour: `process()` rebuilds each detection for the
+full-resolution frame (`detsFull`) with only `quad`, `hull` and `area`, so the
+new `edges` were silently dropped and `dominantTilt()` fell back every time.
+Everything still worked, slightly worse than before, with no error anywhere.
+
+### The solidity: the approximation was already right
+
+`solidity` is now `polyArea(contour) / polyArea(hull(contour))` — literally
+Python's `contourArea(contour) / contourArea(hull)`. Across 126 photos **no file
+moved by more than 0.007**. The old `closedArea / hullArea` was accurate; its
+only real defect was being a pixel count over a polygon area, which let it read
+**above 1.0** on three files, so the number `MULTI_WINDOWS`'s companion
+threshold was set against wasn't quite the quantity it named. Now it is, and it
+is bounded by construction — `tests/test_web.py` asserts that outright.
+
+### And the thing it was supposed to fix, it can't
+
+The premise was that the app reads the staggered row `153435918` as a clean card
+(0.995/0.998) because its solidity can't see the row's notches, and that a real
+contour would drop it to Python's 0.863/0.793 and free `MULTI_WINDOWS` to be
+split the way Python's is. With a real contour the file measures **0.994**.
+
+Rendering both masks side by side explains it: **the app is not wrong.** Its
+blob for that photo genuinely is a clean rectangle. Python's is not, because
+Python's segmentation welds a patch of desk sheen onto it — the blob's bbox
+starts at (0,0), and `_sheen_free_bbox` finds one sheen piece of 11 k px at 323
+mean Scharr. It is that appendage, not the staggering, that costs Python's shape
+test. The two masks differ by a pixel or two inside a 43-px close: the same
+close bridges the sheen on one decoder's pixels and not on the other's.
+
+So the four files passing the JS shape gate still interleave exactly as before —
+6 windows: one real row and one genuine single; 7 windows: one genuine single
+and one real row — and `MULTI_WINDOWS` stays 6 for both JS gates. The
+conclusion in `docs/PIPELINE.md` § 3 was right; the reason given for it was
+wrong, and is now corrected. Two genuine singles are still levelled rather than
+cropped in the app, and that is not a contour problem.
+
+### Also
+
+`tools/webdetect.py` was labelling from the page's prose, which lies by
+omission: a cleanly cropped single that also raises "orientation uncertain"
+shows *only* the warning, so two of them were being filed as `other`. It now
+reads `lastDetection.cropped` / `.aligned` instead.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
