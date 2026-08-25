@@ -22,6 +22,7 @@ checleaner/
   tests/test_pipeline.py regression tests for checleaner.py
   tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
+  web/facedetect-probe.html  TEMPORARY: does the phone's own FaceDetector suffice? Delete after
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
