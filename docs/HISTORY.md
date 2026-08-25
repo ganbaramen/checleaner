@@ -1464,6 +1464,64 @@ precaches `SHELL` on install, so anything added there is downloaded once and
 kept. The real constraint is `file://` — an opaque origin can't `fetch()`
 sibling files, so no WASM runtime loads there however well cached.
 
+## 2026-08-24 — border asymmetry can't pick the turn either
+
+With the browser's `FaceDetector` ruled out (above), the cheapest remaining
+route to content reorientation in the app was geometry with no model at all. An
+instax has a 4 mm border above its picture and a 20 mm signature border below,
+and `orientation()` already reads exactly that to stand a *single* card up. On a
+levelled multi-print frame every print carries the same asymmetry, and
+`count_windows()`'s flood fill already finds each window — so walk out of each
+window until the paper ends, call the long side that print's "down", and let the
+prints vote.
+
+Measured before writing any app code, against the `reorient` column of
+`report.csv` (what the face detector chose) over 81 multi-print frames.
+`tools/orientcheck.py`.
+
+**It doesn't work, and the reason is structural.** The first attempt walked
+until the paper ended and produced runs of 261, 284 and 587 px where a real
+20 mm border is about 58: in a merged blob the paper is *continuous across
+cards*, so "distance until the paper ends" is a property of the pile, not the
+print. Two corrections — cap the walk at a fraction of the window's own short
+side, and compare opposite pairs rather than all four directions (a card in a
+row has free top and bottom but neighbours left and right, and the capped
+neighbour distances otherwise win outright) — and it still doesn't separate:
+
+| CAP | RATIO | abstain | right | wrong |
+|---|---|---|---|---|
+| 0.75 | 2.5 | 15 | 36 | **30** |
+| 0.75 | 4.0 | 40 | 19 | 23 |
+| 0.60 | 2.5 | 24 | 28 | 30 |
+| 0.60 | 4.0 | 50 | 16 | **16** |
+| 1.00 | 2.5 | 12 | 38 | 32 |
+
+Tightening the ratio converts votes into abstentions without improving the odds
+of the votes that remain — at 0.60/4.0 it is 16 right against 16 wrong, a coin
+flip. And the bar here is not "mostly right": of 62 frames that were already
+upright, the best setting **turns 24 of them wrongly**, which is the one mistake
+`content_rotation()`'s whole conservative margin exists to prevent. Missing a
+rotation costs a review; inventing one corrupts a photo that was right.
+
+Breaking accuracy down by how crowded the frame is says exactly where it fails:
+
+| prints in frame | right | wrong |
+|---|---|---|
+| 1–2 | 2 | 0 |
+| 3–5 | 12 | 16 |
+| 6+ | 22 | 14 |
+
+The signal survives only while a card's borders are genuinely free. From three
+prints up it is noise — and multi-print frames are, by definition, the crowded
+case.
+
+**So this route is not an alternative to per-print segmentation; it is blocked
+behind it.** To measure one card's border you have to know where that card ends,
+which is the "split multi-print photos" next step. If that ever lands, rerun
+`tools/orientcheck.py` — the estimator is kept there for exactly that reason,
+and the scoring half (ground truth, the upright-frames-turned-wrongly count, the
+crowding breakdown) is reusable by whatever replaces it.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

@@ -19,6 +19,7 @@ checleaner/
   docs/HISTORY.md        every batch processed, with before/after measurements
   tools/detect.py        fast detection-only preview for named files (no colour pass)
   tools/webdetect.py     the same, for checleaner.html — drives the page under Playwright
+  tools/orientcheck.py   scores an orientation estimator against report.csv's own answers
   tests/test_pipeline.py regression tests for checleaner.py
   tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
@@ -274,19 +275,19 @@ directly.
    never shipped unflagged, and a flag isn't something an app can depend on.
    That was the one route costing zero bytes, and it's closed.
 
-   What's left, in the order worth trying:
-   - **Per-print border asymmetry, no model at all.** An instax has a 4 mm
-     border one end and a 20 mm signature border the other, and `orientation()`
-     already reads exactly that to stand a *single* card up. On a levelled
-     multi-print frame every print carries the same asymmetry, and
-     `countWindows()`'s flood fill already finds each window — so the prints
-     could vote on which way is down. Costs nothing, works on `file://`, works
-     offline. Caution: `docs/PIPELINE.md` § 6 records that the mixed
-     landscape-plus-portrait layout is one "the geometry approach could never
-     have split". That was about the *outline's* geometry, which is a different
-     signal from per-print border asymmetry — but it means geometry has been
-     tried and found wanting once, so measure against the five known-sideways
-     frames before trusting it.
+   What's left:
+   - ~~**Per-print border asymmetry, no model at all.**~~ **Measured and
+     rejected** — `tools/orientcheck.py`, and the 2026-08-24 entry in
+     `docs/HISTORY.md`. In a merged blob the paper is continuous across cards,
+     so "how far to the edge of this print's border" is unmeasurable: the walk
+     crosses whole neighbouring cards. Capping it and comparing opposite pairs
+     still leaves a coin flip (16 right against 16 wrong at the tightest
+     setting) and turns 24 of 62 already-upright frames the wrong way, which is
+     the one mistake the conservative margin exists to prevent. Accuracy is
+     fine at 1–2 prints and noise from 3 up, which is where multi-print frames
+     live. **This is blocked behind "split multi-print photos" below, not an
+     alternative to it** — measuring a card's border needs to know where the
+     card ends. Rerun `orientcheck.py` if that ever lands.
    - **onnxruntime-web + the same YuNet model** (~230 KB) as a hosted-only
      enhancement. Offline is *not* the obstacle: `web/sw.js` precaches `SHELL`
      on install, so adding the runtime and model there and bumping `VERSION`
