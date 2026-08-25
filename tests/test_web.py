@@ -35,6 +35,7 @@ import os
 import sys
 import cv2
 import tempfile
+import urllib.request
 import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -44,7 +45,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from PIL import Image
 
 from checleaner import measure, to_srgb, ASPECT, build_parser
-from test_pipeline import (skip, _Skip, make_single, make_single_with_glare,
+from test_pipeline import (skip, _Skip, _photo, REAL_REORIENT, REAL_UPRIGHT,
+                           make_single, make_single_with_glare,
                            make_single_with_welded_glare, make_card_on_pale_desk,
                            make_row, make_signed_row, make_staggered_pile, make_grid,
                            make_flush_grid, add_glare)
@@ -53,6 +55,10 @@ from test_pipeline import (skip, _Skip, make_single, make_single_with_glare,
 # one through --width, so take it from the CLI's default rather than restating it.
 OUT_W = build_parser().parse_args(["."]).width
 OUT_H = round(OUT_W * ASPECT)
+
+# a HEAD-ish probe of the pinned runtime, so a missing network skips the face
+# tests rather than failing them
+ORT_PROBE = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.min.js"
 
 try:
     from tools.webdetect import run as drive_page
@@ -124,6 +130,62 @@ def output(name):
     return rgb
 
 
+# ------------------------------------------------- content reorientation
+
+_HOSTED = {}
+
+
+def hosted(stamps):
+    """Real photos through the app **served over http**, cached: {stamp: row}.
+
+    Content reorientation is the one thing that can't be tested over `file://`:
+    an opaque origin can fetch neither the face runtime nor the model, so the
+    app declines by design and every turn comes back "-". `webdetect.py --serve`
+    assembles the same `_site` the Pages workflow builds and drives that, which
+    is also the only way this suite covers what actually ships.
+    """
+    missing = [s for s in stamps if s not in _HOSTED]
+    if missing:
+        folder = os.path.join(REPO, "chekis", "main")
+        if not os.path.isdir(folder):
+            skip("chekis/main not present (photos are gitignored)")
+        if drive_page is None:
+            skip("Playwright not installed")
+        try:                                  # the runtime is a pinned CDN download
+            urllib.request.urlopen(ORT_PROBE, timeout=10).read(1)
+        except Exception as exc:
+            skip(f"onnxruntime CDN unreachable, so the face path can't run: {exc}")
+        paths = [_photo(folder, s) for s in missing]
+        if any(p is None for p in paths):
+            skip("some reorientation reference photos are missing")
+        rows, errs = drive_page(paths, quiet=True, serve=True)
+        assert not errs, "page errors: " + "; ".join(dict.fromkeys(errs))
+        for stamp, row in zip(missing, rows):
+            _HOSTED[stamp] = row
+    return {s: _HOSTED[s] for s in stamps}
+
+
+def test_web_stands_sideways_frames_upright():
+    """The app's own port of content_rotation(), on the frames whose correct
+    turn is known. Same model, same thresholds, same scoring as
+    `checleaner.py` -- so the numbers to match are its numbers."""
+    rows = hosted(list(REAL_REORIENT))
+    for stamp, want in REAL_REORIENT.items():
+        got = rows[stamp]["turn"]
+        assert got == str(want * 90), \
+            f"{stamp}: app turned {got}, checleaner.py turns {want * 90}"
+
+
+def test_web_leaves_upright_frames_alone():
+    """The half that matters more. A frame already upright must not be touched:
+    missing a rotation costs one look, inventing one corrupts a photo that was
+    right, which is why content_rotation() only turns on a decisive margin."""
+    rows = hosted(list(REAL_UPRIGHT))
+    for stamp in REAL_UPRIGHT:
+        got = rows[stamp]["turn"]
+        assert got in ("-", "0"), f"{stamp}: app turned an upright frame by {got}"
+
+
 # ------------------------------------------------------------ classification
 
 # What the page's own captions mean, per fixture. `single?` is the near-miss
@@ -185,6 +247,37 @@ def test_web_flush_grid_is_caught_only_by_its_windows():
     # here means the crop path was taken -- which the assertion above has ruled out
     assert r["windows"] != "-" and int(r["windows"]) >= 6, \
         f"window count came back {r['windows']!r}; the backstop cannot fire on that"
+
+
+def test_web_rotation_inverse_actually_inverts():
+    """`alignMulti()` maps candidate crops back through the inverse of its own
+    rotation to check they stay inside the photo. That inverse had the sign of
+    `b` wrong in both the matrix and the offset -- it applied the rotation a
+    second time instead of undoing it.
+
+    It hid for months because every tilt in the library is under 2 degrees,
+    where the round-trip error is ~14 px and `place()`'s slack absorbs it. A 90
+    degree content turn makes it 3605 px and every crop candidate fails to
+    place. Checked here as arithmetic rather than through a fixture, because the
+    only input that exposes it is one the fixtures don't produce.
+    """
+    import math
+    for deg in (0.216, 45.0, 90.216, 180.0):
+        rad = math.radians(deg)
+        a, b = math.cos(rad), math.sin(rad)
+        w, h = 3072.0, 4080.0
+        cx, cy = w / 2, h / 2
+        tx = (1 - a) * cx - b * cy
+        ty = b * cx + (1 - a) * cy
+        nw = round(h * abs(b) + w * abs(a))
+        nh = round(h * abs(a) + w * abs(b))
+        tx += nw / 2 - cx
+        ty += nh / 2 - cy
+        fx, fy = a * 1000 + b * 1500 + tx, -b * 1000 + a * 1500 + ty   # forward
+        dx, dy = fx - tx, fy - ty
+        bx, by = a * dx - b * dy, b * dx + a * dy                       # invMap
+        assert math.hypot(bx - 1000, by - 1500) < 1e-6, \
+            f"{deg} deg: round trip landed {bx:.1f},{by:.1f}"
 
 
 def test_web_solidity_is_a_real_ratio():

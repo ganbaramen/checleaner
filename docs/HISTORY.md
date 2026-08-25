@@ -1522,6 +1522,95 @@ which is the "split multi-print photos" next step. If that ever lands, rerun
 and the scoring half (ground truth, the upright-frames-turned-wrongly count, the
 crowding breakdown) is reusable by whatever replaces it.
 
+## 2026-08-25 — content reorientation ported to the phone app
+
+The last thing `checleaner.py` did that the app didn't. Two cheaper routes were
+measured and rejected first (the two entries above), leaving onnxruntime-web
+plus the same YuNet model.
+
+**Result: the app's turns agree with `checleaner.py` on 126 of 126 photos**, and
+it now turns 19 frames by itself that previously needed the rotate buttons.
+
+### Scoped before building, twice
+
+The ONNX has a hard-coded `[1,3,640,640]` input where `cv2.FaceDetectorYN`
+reshapes the network per frame, so a browser has to squash every frame into a
+square first. Rather than discover that after a day's work, it was tested in
+Python: force the square, rerun the decisions. **80 of 81 frames decide the
+same** — not fatal, so the route was worth taking.
+
+Sizes were measured too, since the answer decides delivery: `ort.min.js` 0.52 MB
+plus `ort-wasm-simd.wasm` 10.06 MB at the last version that still ships a
+non-threaded build (1.20 dropped it, and threads need COOP/COEP headers Pages
+can't set). MediaPipe was no smaller (9.3 MB); TF.js is far smaller but its
+short-range face model is built for selfies, not for faces inside a photo of
+photos.
+
+### The split: CDN the runtime, commit the model
+
+10.6 MB is too much to put in git history forever, so `onnxruntime-web` comes
+from jsdelivr at a pinned version and `web/sw.js` precaches it — one online
+launch, offline thereafter, undone by deleting a few lines. The 232 KB model
+*is* committed: it has to stay byte-identical to `checleaner.py`'s (verified by
+hash), and the only CDN that serves it is an LFS redirect, which is a poor thing
+for a service worker to depend on. jsdelivr's copy of the zoo is a 131-byte LFS
+pointer, which would have been a confusing failure to debug later.
+
+One thing that needed care: the service worker's fetch handler returned early
+for anything cross-origin, so the runtime would have gone to the network every
+time and the app would have quietly stopped working offline. It has a branch for
+the pinned prefix now. And the precache of the big files is deliberately *not*
+awaited into install's success — a CDN hiccup shouldn't stop the app installing,
+it should just mean reorientation waits for the next online launch.
+
+### YuNet's post-processing, reimplemented
+
+`cv2.FaceDetectorYN` hides it; onnxruntime hands back 12 raw tensors. So
+`yunetFaces()` does what OpenCV does internally: one prior per feature cell at
+strides 8/16/32, score = `sqrt(cls * obj)`, box decoded relative to its cell,
+then NMS — the boxes exist only so overlapping detections of one face can be
+suppressed before the scores are summed.
+
+Verified against Python before touching the app: per-turn scores match to about
+0.01 across six frames, the difference being canvas resampling against
+`cv2.resize`. The one apparent mismatch was a single face straddling the 0.6
+score threshold, with both implementations agreeing on the winning turn anyway.
+
+Two deliberate differences, both forced and both measured: the app scores the
+*corrected* frame (it has already built that canvas by the time it knows the
+frame is multi-print, and re-deriving the raw one means a second full decode on
+a phone), and the square input above. Over 81 frames the decisions still match
+on 79, and **both differences are abstentions rather than wrong turns** — the
+direction it has to miss in.
+
+### A four-month-old bug that only a 90° turn could expose
+
+Folding the turn into `alignMulti()`'s warp made every crop candidate fail to
+place. `invMap`, which maps a candidate crop back through the inverse rotation
+to check it stays inside the photo, had the sign of `b` wrong in both the matrix
+and the offset: it applied the rotation a *second* time instead of undoing it.
+
+It survived since the align port because every tilt in this library is under 2°,
+where `b < 0.035` and the round-trip error is ~14 px — inside the slack
+`place()` already allows. At 90° it is **3605 px**. Fixed, and pinned as
+arithmetic in `tests/test_web.py` rather than through a fixture, because the
+only input that exposes it is one the fixtures don't produce.
+
+Fixing it moved 10 files on the `file://` sweep independently of any of this,
+and slightly *toward* `checleaner.py`: crop labels matching the reference went
+106 → 107 of 126, with two frames gaining the crop Python gives them and one
+correctly giving one up.
+
+### Testing what only exists over http
+
+`file://` is an opaque origin and can fetch neither the runtime nor the model,
+so the app declines there — which also means the default `webdetect.py` sweep
+cannot see this half of the app at all. Hence `--serve`: it assembles the same
+`_site` the Pages workflow builds and drives that, so what is tested is what
+ships. `tests/test_web.py` uses it for two new tests, skipped when the CDN is
+unreachable, covering both halves of the contract — the five known-sideways
+frames get stood up, and the frames already upright are left alone.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

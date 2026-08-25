@@ -788,8 +788,40 @@ other multi/aligned/`single?` frames untouched.
 **Model.** YuNet, ~230 KB, cached under `~/.cache/checleaner/` and fetched from
 the OpenCV Zoo on first use (override the path with `$CHEKI_FACE_MODEL`, or
 disable the whole step with `--no-reorient`). This is the pipeline's one learned
-component; everything else is classic CV. It lives only in `checleaner.py`; the
-phone app does the rest of the alignment but stands the result upright by hand.
+component; everything else is classic CV.
+
+**Ported to `checleaner.html`** (2026-08-25), on onnxruntime-web with the
+byte-identical model committed at `web/face_detection_yunet_2023mar.onnx` (MIT,
+Shiqi Yu). Same thresholds, same scoring, same conservative margin. Across all
+81 multi-print photos in the library the app agrees with `checleaner.py` on 79,
+and **both differences are abstentions, not wrong turns** — which is the
+direction it has to miss in.
+
+Three things about the port are worth knowing before touching it:
+
+- **The runtime is a pinned CDN download, the model is not.** `onnxruntime-web`
+  is ~10.6 MB, too much to keep in git history forever, so it comes from
+  jsdelivr at a pinned version and `web/sw.js` precaches it: one online launch,
+  offline thereafter. The 232 KB model *is* committed, because it has to stay
+  byte-identical to the one `checleaner.py` uses and an LFS-backed URL is a poor
+  thing to depend on. The service worker's fetch handler had to grow a
+  cross-origin branch — its same-origin guard would otherwise hand the runtime
+  to the network and the app would quietly stop working offline.
+- **It reads the *corrected* frame**, where `checleaner.py` insists on the raw
+  one. By the time the app knows a frame is multi-print it has already built the
+  corrected canvas, and re-deriving the raw one means a second full decode on a
+  phone. Measured over 81 frames, the decisions still match.
+- **The frame is squashed into a fixed 640×640.** `cv2.FaceDetectorYN` reshapes
+  the network per frame; the ONNX has a hard-coded `[1,3,640,640]` input and
+  onnxruntime-web cannot resize it. Measured on its own before any of this was
+  built: 80 of 81 frames decide the same either way, so the constraint is not
+  fatal.
+
+None of it works on `file://` — an opaque origin can fetch neither the runtime
+nor the model — so the app declines there and keeps its manual ⟲/⟳ buttons,
+which is the same "graceful absence" contract `content_rotation()` has always
+had. That also means `tools/webdetect.py` can only exercise this with `--serve`,
+which assembles the real `_site` and drives it over http.
 
 ---
 

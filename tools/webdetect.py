@@ -38,8 +38,15 @@ import re
 import sys
 import csv
 import base64
+import shutil
 import pathlib
 import argparse
+import tempfile
+import functools
+import threading
+import contextlib
+import http.server
+import socketserver
 
 # A dev-only dependency, and an *optional* one: tests/test_web.py imports this
 # module to drive the page and skips itself when the import fails, so the failure
@@ -51,7 +58,34 @@ except ImportError:
 
 NEEDS_PLAYWRIGHT = "needs Playwright: pip install playwright && playwright install chromium"
 
-PAGE = pathlib.Path(__file__).resolve().parent.parent / "checleaner.html"
+REPO = pathlib.Path(__file__).resolve().parent.parent
+PAGE = REPO / "checleaner.html"
+
+
+@contextlib.contextmanager
+def hosted_site():
+    """Serve the app the way GitHub Pages does, and yield its URL.
+
+    `file://` is an opaque origin: it can't fetch the face runtime or the model,
+    so content reorientation is off there by design and a sweep over the local
+    file can't see it at all. This assembles the same `_site` layout the Pages
+    workflow builds -- checleaner.html as index.html alongside everything in
+    web/ -- so what gets driven is what gets deployed, and the app's `./`
+    relative paths resolve exactly as they will in production.
+    """
+    site = tempfile.mkdtemp(prefix="checleaner-site-")
+    shutil.copy(PAGE, os.path.join(site, "index.html"))
+    for f in (REPO / "web").iterdir():
+        if f.is_file():
+            shutil.copy(f, site)
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=site)
+    httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{httpd.server_address[1]}/index.html"
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(site, ignore_errors=True)
 
 # The page is done when it says so, has given up, or has fallen over -- all
 # three are terminal, and waiting only on the first hangs for the timeout.
@@ -98,7 +132,7 @@ READ = """() => ({
 })"""
 
 FIELDS = ["file", "kind", "crop", "size", "white", "gain", "aspect", "fill",
-          "solidity", "glare", "windows", "prints", "tilt", "sig", "flags"]
+          "solidity", "glare", "windows", "prints", "tilt", "turn", "sig", "flags"]
 
 
 def summarise(name: str, out: dict) -> dict:
@@ -151,16 +185,21 @@ def summarise(name: str, out: dict) -> dict:
         "windows": grab(r"photo windows(\d+)"),
         "prints": grab(r"prints seen(\d+)"),
         "tilt": grab(r"levelled(-?[\d.]+)°"),
+        # the content turn, which only exists when the page is served over http
+        # (see --serve); on file:// it is always "-"
+        "turn": str(det.get("reorient", "-")),
         "sig": out.get("sig", "-"),
         "flags": re.sub(r"\(aspect [\d.]+\)", "(aspect N)", flags),
     }
 
 
-def run(files, save=None, quiet=False):
+def run(files, save=None, quiet=False, serve=False):
     if sync_playwright is None:
         raise RuntimeError(NEEDS_PLAYWRIGHT)
     rows, errs = [], []
-    with sync_playwright() as p:
+    with contextlib.ExitStack() as stack:
+        url = stack.enter_context(hosted_site()) if serve else f"file://{PAGE}"
+        p = stack.enter_context(sync_playwright())
         browser = p.chromium.launch()
         page = browser.new_page()
         page.on("pageerror", lambda e: errs.append(str(e)))
@@ -168,7 +207,7 @@ def run(files, save=None, quiet=False):
                 lambda m: errs.append("console: " + m.text) if m.type == "error" else None)
         for f in files:
             name = pathlib.Path(f).name
-            page.goto(f"file://{PAGE}")
+            page.goto(url)
             page.set_input_files("#pick", str(pathlib.Path(f).resolve()))
             page.wait_for_function(DONE, timeout=180_000)
             row = summarise(name, page.evaluate(READ))
@@ -224,6 +263,10 @@ def main() -> int:
     ap.add_argument("--csv", metavar="OUT", help="write the verdicts as CSV for later --compare")
     ap.add_argument("--compare", metavar="BASELINE", help="print only what moved since this CSV")
     ap.add_argument("--save", metavar="DIR", help="write each corrected frame to DIR")
+    ap.add_argument("--serve", action="store_true",
+                    help="drive the app over http from an assembled _site instead of "
+                         "file:// -- the only way to exercise content reorientation, "
+                         "which an opaque origin can't load a runtime for")
     args = ap.parse_args()
     if sync_playwright is None:
         sys.exit(NEEDS_PLAYWRIGHT)
@@ -232,7 +275,8 @@ def main() -> int:
     if missing:
         sys.exit("no such file: " + ", ".join(missing))
 
-    rows, errs = run(args.files, save=args.save, quiet=bool(args.compare))
+    rows, errs = run(args.files, save=args.save, quiet=bool(args.compare),
+                     serve=args.serve)
     if args.csv:
         with open(args.csv, "w", newline="") as fh:
             w = csv.DictWriter(fh, FIELDS)

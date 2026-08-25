@@ -23,6 +23,7 @@ checleaner/
   tests/test_pipeline.py regression tests for checleaner.py
   tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
+  web/face_detection_yunet_2023mar.onnx  the face model, MIT, identical to checleaner.py's
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
@@ -131,7 +132,13 @@ python3 tools/webdetect.py chekis/main/*.jpg              # sweep, one line each
 python3 tools/webdetect.py --csv before.csv chekis/main/*.jpg
 python3 tools/webdetect.py --csv after.csv --compare before.csv chekis/main/*.jpg
 python3 tools/webdetect.py --save /tmp/js <files…>        # write the corrected frames
+python3 tools/webdetect.py --serve <files…>              # over http, not file://
 ```
+
+`--serve` assembles the same `_site` the Pages workflow builds and drives that.
+It is the only way to exercise **content reorientation**: `file://` is an opaque
+origin and can fetch neither the face runtime nor the model, so the app declines
+there and a default sweep sees none of it.
 
 `--compare` prints only the files whose verdict moved, which is how you sweep
 before changing a JS threshold — the JS ones (`MULTI_WINDOWS`,
@@ -164,6 +171,36 @@ copies, it doesn't fork**, so edit `checleaner.html` and never the published
 copy. The `file://` path is unchanged by any of this: the PWA bits self-disable
 off http/https, which is why `tools/webdetect.py` can drive the local file
 directly.
+
+## The two implementations
+
+`checleaner.py` is the reference; `checleaner.html` is a port, and by now nearly
+a complete one. Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window
+backstop, contour-traced solidity, the edge-direction tilt, the desk-glare blob
+filter, the sheen trim, the lopsided-crop rule, the paper-confined white anchor
+and content reorientation are all there. `MULTI_WINDOWS`, `CARD_EDGE_SHARP` and
+`TILT_COHERENCE` are calibrated against the app's own pixels, not copied —
+canvas decoding isn't `cv2`'s.
+
+Two things are still desktop-only, for different reasons:
+
+- **Desk matching never can be ported.** Its target is a folder-wide median and
+  the app sees one photo at a time. Not a gap to close.
+- **Content reorientation is off on `file://`.** An opaque origin can fetch
+  neither the face runtime nor the model, so the app declines there and keeps
+  its manual ⟲/⟳ buttons. Hosted, it works. This is why
+  `tools/webdetect.py --serve` exists — the default `file://` sweep cannot see
+  that half of the app at all.
+
+**Two cheaper routes to reorientation were tried first and both failed; don't
+re-propose them.** The browser's own `FaceDetector` is not present (Chrome 151
+on Android, secure context, `false`) — the Shape Detection API's face half never
+shipped unflagged. And per-print border asymmetry, which needs no model at all,
+is a coin flip on real frames: in a merged blob the paper is continuous across
+cards, so one print's border can't be measured without first knowing where that
+print ends. See `tools/orientcheck.py` and the 2026-08-24 entries in
+`docs/HISTORY.md`. The second becomes worth retrying only if the split-prints
+next step lands.
 
 ## Invariants — do not change casually
 
@@ -255,50 +292,7 @@ directly.
 
 ## Next steps, roughly in order of value
 
-1. **Give `checleaner.html` a face detector for content reorientation.**
-   Levelling, the best-fit `CROP_ASPECTS` crop, the photo-window backstop
-   (`countWindows()`), contour-traced solidity, the edge-direction tilt
-   (`traceContour()` → `edgeDirs()` → `circularTilt()`), the desk-glare blob
-   filter, the sheen trim (`sheenFreeBox()`), the lopsided-crop rule, and the
-   paper-confined white anchor are all now ported (see `docs/PIPELINE.md`
-   §§ 1, 3, 6) — window counts, `MULTI_WINDOWS` and `CARD_EDGE_SHARP` are
-   calibrated separately from Python's, since canvas image decoding isn't
-   pixel-identical to `cv2`'s.
-   Desk *matching* has never existed in the app and can't: the target is a
-   folder-wide median, and the app sees one photo at a time. What's still
-   desktop-only besides that is `content_rotation()`: the app offers manual
-   ⟲/⟳/180° rotate buttons instead.
-
-   **The browser's own `FaceDetector` is not an option — measured, don't
-   re-check casually.** Chrome 151 on Android, over HTTPS, in a secure context:
-   `'FaceDetector' in window` is `false`. The Shape Detection API's face half
-   never shipped unflagged, and a flag isn't something an app can depend on.
-   That was the one route costing zero bytes, and it's closed.
-
-   What's left:
-   - ~~**Per-print border asymmetry, no model at all.**~~ **Measured and
-     rejected** — `tools/orientcheck.py`, and the 2026-08-24 entry in
-     `docs/HISTORY.md`. In a merged blob the paper is continuous across cards,
-     so "how far to the edge of this print's border" is unmeasurable: the walk
-     crosses whole neighbouring cards. Capping it and comparing opposite pairs
-     still leaves a coin flip (16 right against 16 wrong at the tightest
-     setting) and turns 24 of 62 already-upright frames the wrong way, which is
-     the one mistake the conservative margin exists to prevent. Accuracy is
-     fine at 1–2 prints and noise from 3 up, which is where multi-print frames
-     live. **This is blocked behind "split multi-print photos" below, not an
-     alternative to it** — measuring a card's border needs to know where the
-     card ends. Rerun `orientcheck.py` if that ever lands.
-   - **onnxruntime-web + the same YuNet model** (~230 KB) as a hosted-only
-     enhancement. Offline is *not* the obstacle: `web/sw.js` precaches `SHELL`
-     on install, so adding the runtime and model there and bumping `VERSION`
-     buys one online launch and permanent offline use. Three real costs
-     instead: a few MB of WASM (single-threaded only — threads need COOP/COEP
-     headers and GitHub Pages can't set them); `file://` can't `fetch()`
-     sibling files at all, so that path keeps the manual buttons and the two
-     builds diverge by one more feature; and `tools/webdetect.py` drives the
-     local file, so it would need a throwaway static server to keep covering
-     the new path.
-2. **Split multi-print photos into separate crops.** Still balanced as one
+1. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
    into one blob.

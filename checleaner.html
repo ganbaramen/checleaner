@@ -139,6 +139,21 @@ const CROP_MARGIN = 0.04;
 const CROP_MARGIN_STEPS = 4;
 // Rows of clean paper that end a run of desk in trimInsets' edge scan. See there.
 const TRIM_GAP = 6;
+// Content reorientation. Same model, thresholds and scoring as
+// checleaner.py's content_rotation(); see docs/PIPELINE.md § 6.
+// The runtime comes from a pinned CDN and the model from this origin -- both
+// precached by the service worker, so it is one online launch and then offline
+// forever. Off entirely on file://, which cannot fetch either.
+const ORT_VERSION = "1.17.3";
+const ORT_BASE  = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
+const FACE_MODEL = "./face_detection_yunet_2023mar.onnx";
+const FACE_SIZE = 640;          // the ONNX input is fixed at 640x640
+const FACE_STRIDES = [8, 16, 32];
+const FACE_SCORE = 0.6;         // cv2.FaceDetectorYN.create(..., 0.6, 0.3, 5000)
+const FACE_NMS   = 0.3;
+const TURN_MIN_SCORE = 1.2;     // content_rotation()'s min_score
+const TURN_MARGIN    = 1.5;     // ... and margin
+const TURN_DOWNSCALE = 1400;    // ... and downscale
 // Shortest straight run of a blob's outline that counts as a card edge rather
 // than a jag in the mask. Same 8 px as checleaner.py: both measure on a frame
 // scaled to 1100 on its long edge, so the number transfers directly.
@@ -1160,6 +1175,135 @@ function rotate90(img, cw) {
   return out;
 }
 
+/* ------------------------------------------------ content reorientation */
+/* Geometry gives level; it can't give up. Port of checleaner.py's
+   content_rotation(): score each of the four quarter turns by summed face
+   confidence and take the turn that stands the most faces upright -- chekis are
+   photographs of people, so faces are the signal when the outline has none.
+
+   Everything conservative about the desktop version is kept, because the
+   asymmetry is the whole point: a turn only wins over leaving the frame alone
+   when the frame as-is has little face evidence *and* another turn is
+   decisively better. Missing a rotation costs one look; inventing one corrupts
+   a photo that was already right.
+
+   Two differences from checleaner.py, both forced:
+
+   - It reads the *corrected* frame, not the raw one. checleaner.py deliberately
+     scores the uncorrected pixels (balancing to 238.8 first costs detections),
+     but by the time the app knows a frame is multi-print it has already built
+     the corrected canvas, and re-deriving the raw one would mean a second full
+     decode on a phone. Measured over 81 frames the decisions still match.
+   - The frame is squashed into a fixed 640x640. cv2.FaceDetectorYN reshapes the
+     network per frame; the ONNX on disk has a hard-coded [1,3,640,640] input
+     and onnxruntime-web cannot resize it. Measured: 80 of 81 frames decide the
+     same either way.
+
+   Against checleaner.py over all 81 multi-print photos in the library this
+   agrees on 79, and **both differences are abstentions, not wrong turns** --
+   two frames whose winning score falls just under min_score once squashed. That
+   is the safe direction to miss in. */
+let facePromise = null;
+
+function faceSession() {
+  if (facePromise) return facePromise;
+  facePromise = (async () => {
+    // file:// is an opaque origin: it can neither fetch the runtime nor the
+    // model. Rather than throw a confusing CORS error, decline up front -- the
+    // caller treats a null session exactly as checleaner.py treats a missing
+    // model, by leaving the frame alone.
+    if (location.protocol !== "http:" && location.protocol !== "https:") return null;
+    await new Promise((ok, fail) => {
+      const el = document.createElement("script");
+      el.src = ORT_BASE + "ort.min.js";
+      el.onload = ok; el.onerror = () => fail(new Error("onnxruntime-web failed to load"));
+      document.head.appendChild(el);
+    });
+    ort.env.wasm.wasmPaths = ORT_BASE;
+    ort.env.wasm.numThreads = 1;    // threads need COOP/COEP; Pages can't set them
+    ort.env.logLevel = "error";
+    return await ort.InferenceSession.create(FACE_MODEL, { executionProviders: ["wasm"] });
+  })().catch(err => { console.warn("face detector unavailable:", err); return null; });
+  return facePromise;
+}
+
+/* YuNet's post-processing, which cv2.FaceDetectorYN does internally and
+   onnxruntime hands back raw: one prior per feature cell at each stride, score
+   = sqrt(cls * obj), box decoded relative to its cell. Boxes are only needed so
+   overlapping detections of one face can be suppressed before the scores are
+   summed. */
+function yunetFaces(outputs) {
+  const faces = [];
+  for (const stride of FACE_STRIDES) {
+    const cls = outputs["cls_" + stride].data;
+    const obj = outputs["obj_" + stride].data;
+    const box = outputs["bbox_" + stride].data;
+    const cells = FACE_SIZE / stride;
+    for (let r = 0; r < cells; r++) for (let c = 0; c < cells; c++) {
+      const i = r * cells + c;
+      const score = Math.sqrt(Math.max(0, cls[i]) * Math.max(0, obj[i]));
+      if (score < FACE_SCORE) continue;
+      const cx = (c + box[i * 4]) * stride, cy = (r + box[i * 4 + 1]) * stride;
+      const w = Math.exp(box[i * 4 + 2]) * stride, h = Math.exp(box[i * 4 + 3]) * stride;
+      faces.push({ x: cx - w / 2, y: cy - h / 2, w, h, score });
+    }
+  }
+  faces.sort((a, b) => b.score - a.score);
+  const keep = [];
+  for (const f of faces) {
+    let overlapped = false;
+    for (const k of keep) {
+      const ix = Math.max(0, Math.min(f.x + f.w, k.x + k.w) - Math.max(f.x, k.x));
+      const iy = Math.max(0, Math.min(f.y + f.h, k.y + k.h) - Math.max(f.y, k.y));
+      const inter = ix * iy;
+      if (inter / (f.w * f.h + k.w * k.h - inter) > FACE_NMS) { overlapped = true; break; }
+    }
+    if (!overlapped) keep.push(f);
+  }
+  return keep;
+}
+
+/* Quarter turns (CCW, 0-3) that stand this frame upright, or 0 for "leave it". */
+async function contentRotation(canvas) {
+  let session;
+  try { session = await faceSession(); } catch (_) { return 0; }
+  if (!session) return 0;
+  const scale = Math.min(1, TURN_DOWNSCALE / Math.max(canvas.width, canvas.height));
+  const sw = Math.max(1, Math.round(canvas.width * scale));
+  const sh = Math.max(1, Math.round(canvas.height * scale));
+  const square = document.createElement("canvas");
+  square.width = square.height = FACE_SIZE;
+  const g = square.getContext("2d", { willReadFrequently: true });
+  g.imageSmoothingQuality = "high";
+  const n = FACE_SIZE * FACE_SIZE, tensor = new Float32Array(3 * n);
+  const scores = [];
+  for (let k = 0; k < 4; k++) {
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, FACE_SIZE, FACE_SIZE);
+    g.translate(FACE_SIZE / 2, FACE_SIZE / 2);
+    g.rotate(-k * Math.PI / 2);          // np.rot90 turns CCW; canvas turns CW
+    g.drawImage(canvas, 0, 0, canvas.width, canvas.height,
+                -FACE_SIZE / 2, -FACE_SIZE / 2, FACE_SIZE, FACE_SIZE);
+    const px = g.getImageData(0, 0, FACE_SIZE, FACE_SIZE).data;
+    // NCHW, BGR, 0-255: what cv2.dnn.blobFromImage feeds it, no swapRB, no mean
+    for (let i = 0; i < n; i++) {
+      tensor[i]         = px[i * 4 + 2];
+      tensor[n + i]     = px[i * 4 + 1];
+      tensor[2 * n + i] = px[i * 4];
+    }
+    let out;
+    try {
+      out = await session.run({ input: new ort.Tensor("float32", tensor.slice(), [1, 3, FACE_SIZE, FACE_SIZE]) });
+    } catch (err) { console.warn("face detection failed:", err); return 0; }
+    scores.push(yunetFaces(out).reduce((a, f) => a + f.score, 0));
+    await nextFrame();                   // four inferences; keep the page alive
+  }
+  let best = 0;
+  for (let k = 1; k < 4; k++) if (scores[k] > scores[best]) best = k;
+  return (best !== 0 && scores[best] >= TURN_MIN_SCORE
+          && scores[best] > TURN_MARGIN * scores[0]) ? best : 0;
+}
+
 /* -------------------------------------------------- multi-print alignment */
 /* Port of checleaner.py's align_multi(): level and centre a photo of several
    prints. A rectangle reads the same every 90 degrees, so no angle here can be
@@ -1295,10 +1439,16 @@ function paperBbox(rc, bbox) {
    rotation the user applies afterwards. Tapping a rotate button on a 16:9
    result will look like the excluded 9:16 shape, but that is the user's own
    choice made with the image in front of them, not a misclassification. */
-function alignMulti(srcCanvas, dets) {
+function alignMulti(srcCanvas, dets, turn = 0) {
   if (!dets.length) return null;
   const w = srcCanvas.width, h = srcCanvas.height;
-  const angle = dominantTilt(dets), rad = angle * Math.PI / 180;
+  // The content turn is folded into this same warp rather than applied after,
+  // so the CROP_ASPECTS shape is chosen for the frame's *final* orientation --
+  // cropping first and turning after would silently convert a chosen 16:9 into
+  // the 9:16 that list deliberately excludes. Same reason checleaner.py takes
+  // `turn` here instead of rotating the result.
+  const tilt = dominantTilt(dets);
+  const angle = tilt + 90 * (((turn % 4) + 4) % 4), rad = angle * Math.PI / 180;
   const a = Math.cos(rad), b = Math.sin(rad);            // getRotationMatrix2D, scale 1
   const cx = w / 2, cy = h / 2;
   let tx = (1 - a) * cx - b * cy, ty = b * cx + (1 - a) * cy;
@@ -1330,9 +1480,21 @@ function alignMulti(srcCanvas, dets) {
   const pb = paperBbox(rc, [x0, y0, x1, y1]);
   if (pb) [mcx, mcy, bw2, bh2] = pb;
 
-  const det = a * a + b * b, ia = a / det, ib = -b / det;
-  const itx = -(ia * tx - ib * ty), ity = -(ib * tx + ia * ty);
-  const invMap = (x, y) => [ia * x - ib * y + itx, ib * x + ia * y + ity];
+  // rotated -> original. The rotation is [[a, b], [-b, a]], so its inverse is
+  // [[a, -b], [b, a]] applied after subtracting the translation.
+  //
+  // This used to be built by inverting the coefficients in place and got the
+  // sign of `b` wrong in both the matrix and the offset, so it applied the
+  // rotation a second time instead of undoing it. Invisible for four months
+  // because every tilt in the library is under 2 degrees, where b < 0.035 and
+  // the error is ~14 px -- inside the slack `place()` already allows. A 90
+  // degree content turn makes b = 1 and the error 3605 px, and every crop
+  // candidate fails to place. tests/test_web.py round-trips a point through
+  // both to keep it honest.
+  const invMap = (x, y) => {
+    const dx = x - tx, dy = y - ty;
+    return [a * dx - b * dy, b * dx + a * dy];
+  };
   const pad = 0.002 * Math.max(w, h);
 
   // Place a crop of this size so it stays inside the photo's real (unrotated)
@@ -1407,7 +1569,8 @@ function alignMulti(srcCanvas, dets) {
       hw = gw; hh = gh; break;                  // only fits off-centre otherwise
     }
   } else {
-    const ratio = w / h;                    // the frame's own shape -- pre-CROP_ASPECTS fallback
+    // the frame's own shape *as turned* -- pre-CROP_ASPECTS fallback
+    const ratio = (((turn % 4) + 4) % 4) % 2 === 0 ? w / h : h / w;
     hh = Math.max(bh2, bw2 / ratio); hw = hh * ratio;
     const at = place(hw, hh);
     if (!at || lopsided(hw, hh, at[0], at[1])) return null;
@@ -1421,7 +1584,8 @@ function alignMulti(srcCanvas, dets) {
   const xi = Math.max(0, Math.round(cx0)), yi = Math.max(0, Math.round(cy0));
   const xe = Math.min(nw, Math.round(cx1)), ye = Math.min(nh, Math.round(cy1));
   if (xe - xi < 2 || ye - yi < 2) return null;
-  return { img: rctx.getImageData(xi, yi, xe - xi, ye - yi), tilt: angle, n: dets.length, crop: cropLabel };
+  return { img: rctx.getImageData(xi, yi, xe - xi, ye - yi), tilt, turn,
+           n: dets.length, crop: cropLabel };
 }
 
 /* -------------------------------------------------------------- EXIF splice */
@@ -1681,6 +1845,12 @@ async function process(file) {
     // deserved. A wrong guess costs a levelled frame around one card, not a
     // mangled one, and the note below still asks for the look.
     if (nearMiss) flags.push(`couldn't fit one card (aspect ${det.aspect.toFixed(2)}) — check it`);
+    // Decided before alignment and folded into its warp, exactly as
+    // checleaner.py does it. Returns 0 -- leave the frame alone -- whenever the
+    // detector can't be had, which is the whole of the file:// case.
+    setStatus("looking for faces…");
+    await nextFrame();
+    const turn = await contentRotation(cc);
     setStatus("levelling the prints…");
     await nextFrame();
     const detsFull = det.all.map(d => ({
@@ -1692,10 +1862,18 @@ async function process(file) {
       // changes neither. EDGE_MIN_LEN was applied at the analysis scale on
       // purpose, where it matches checleaner.py's.
       edges: d.edges }));
-    const aligned = alignMulti(cc, detsFull);
+    const aligned = alignMulti(cc, detsFull, turn);
     if (aligned) {
       out = aligned.img;
       info.aligned = true; info.tilt = aligned.tilt; info.n = aligned.n; info.crop = aligned.crop;
+      if (turn) info.reorient = turn * 90;
+    } else if (turn) {
+      // align declined, so turn the whole frame instead -- same fallback as
+      // checleaner.py's `if turn: np.rot90(img, turn)`
+      let turned = out;
+      for (let k = 0; k < turn; k++) turned = rotate90(turned, false);
+      out = turned;
+      info.reorient = turn * 90;
     }
   }
 
