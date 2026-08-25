@@ -1427,6 +1427,43 @@ omission: a cleanly cropped single that also raises "orientation uncertain"
 shows *only* the warning, so two of them were being filed as `other`. It now
 reads `lastDetection.cropped` / `.aligned` instead.
 
+## 2026-08-24 — the browser's FaceDetector: asked, answered, no
+
+Content reorientation is the last thing `checleaner.py` does that the app
+doesn't, and the cheapest imaginable way to close it was the browser's own
+`FaceDetector` (Shape Detection API): no model, no WASM, nothing to cache,
+offline from the first run. Chrome on Android had shipped part of that API and
+the phone in question is a Pixel, so it was worth ten minutes before anything
+heavier got built.
+
+`web/facedetect-probe.html`, published so it could be opened on the device:
+
+```
+FaceDetector in window : false
+isSecureContext        : true
+origin                 : https://ganbaramen.github.io
+userAgent              : ... Android 10; K ... Chrome/151.0.0.0 Mobile Safari/537.36
+```
+
+Not present. The face half of Shape Detection never shipped unflagged, and a
+flag is not something an app can depend on. So the probe never got as far as the
+question it was really built to answer — whether a `DetectedFace` carries a
+*confidence*, which decides whether `content_rotation()`'s scoring maths ports
+at all or has to be re-derived from face counts. That question is still open,
+and only matters if some other detector ends up being used.
+
+Probe deleted, as designed; the finding is in `CLAUDE.md`'s next steps so nobody
+spends the same ten minutes again. Two routes remain, and the note now ranks
+them: per-print border asymmetry (no model, works on `file://`, costs nothing —
+`orientation()` already uses that signal for a single card) ahead of
+onnxruntime-web plus YuNet (hosted-only, a few MB, and it takes
+`tools/webdetect.py` off the `file://` path it currently drives).
+
+Worth recording separately: **offline was never the obstacle.** `web/sw.js`
+precaches `SHELL` on install, so anything added there is downloaded once and
+kept. The real constraint is `file://` — an opaque origin can't `fetch()`
+sibling files, so no WASM runtime loads there however well cached.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

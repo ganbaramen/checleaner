@@ -22,7 +22,6 @@ checleaner/
   tests/test_pipeline.py regression tests for checleaner.py
   tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
-  web/facedetect-probe.html  TEMPORARY: does the phone's own FaceDetector suffice? Delete after
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
@@ -266,12 +265,38 @@ directly.
    pixel-identical to `cv2`'s.
    Desk *matching* has never existed in the app and can't: the target is a
    folder-wide median, and the app sees one photo at a time. What's still
-   desktop-only besides that is `content_rotation()`: the app
-   offers manual ⟲/⟳/180° rotate buttons instead, since the offline
-   single-file page can't ship a face model. Closing the gap would need a JS
-   face detector (e.g. onnxruntime-web + the same YuNet model), which also
-   means solving how a `file://` page loads WASM offline (the hosted build has
-   a service worker to lean on; see Hosting).
+   desktop-only besides that is `content_rotation()`: the app offers manual
+   ⟲/⟳/180° rotate buttons instead.
+
+   **The browser's own `FaceDetector` is not an option — measured, don't
+   re-check casually.** Chrome 151 on Android, over HTTPS, in a secure context:
+   `'FaceDetector' in window` is `false`. The Shape Detection API's face half
+   never shipped unflagged, and a flag isn't something an app can depend on.
+   That was the one route costing zero bytes, and it's closed.
+
+   What's left, in the order worth trying:
+   - **Per-print border asymmetry, no model at all.** An instax has a 4 mm
+     border one end and a 20 mm signature border the other, and `orientation()`
+     already reads exactly that to stand a *single* card up. On a levelled
+     multi-print frame every print carries the same asymmetry, and
+     `countWindows()`'s flood fill already finds each window — so the prints
+     could vote on which way is down. Costs nothing, works on `file://`, works
+     offline. Caution: `docs/PIPELINE.md` § 6 records that the mixed
+     landscape-plus-portrait layout is one "the geometry approach could never
+     have split". That was about the *outline's* geometry, which is a different
+     signal from per-print border asymmetry — but it means geometry has been
+     tried and found wanting once, so measure against the five known-sideways
+     frames before trusting it.
+   - **onnxruntime-web + the same YuNet model** (~230 KB) as a hosted-only
+     enhancement. Offline is *not* the obstacle: `web/sw.js` precaches `SHELL`
+     on install, so adding the runtime and model there and bumping `VERSION`
+     buys one online launch and permanent offline use. Three real costs
+     instead: a few MB of WASM (single-threaded only — threads need COOP/COEP
+     headers and GitHub Pages can't set them); `file://` can't `fetch()`
+     sibling files at all, so that path keeps the manual buttons and the two
+     builds diverge by one more feature; and `tools/webdetect.py` drives the
+     local file, so it would need a throwaway static server to keep covering
+     the new path.
 2. **Split multi-print photos into separate crops.** Still balanced as one
    image even after alignment. The detector already returns every blob
    (`detect_all_prints()`); the work is handling prints that touch and merge
