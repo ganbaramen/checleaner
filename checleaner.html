@@ -1658,14 +1658,30 @@ function patchExifSegment(seg, outW, outH) {
   } catch { /* malformed EXIF: ship the file without these tweaks rather than fail the save */ }
 }
 
-async function withExif(blob, srcFile, outW, outH) {
-  if (!srcFile) return blob;
+/* The source's EXIF APP1 segment, plus -- when there isn't one -- why. The two
+   reasons are worth telling apart: a photo that simply carries no EXIF is
+   nobody's fault, while a file we could not read is, and only the second is
+   worth retrying. Read when the file arrives, not when Save is tapped; see
+   sourceExif. */
+async function readExif(file) {
+  if (!file) return { seg: null, note: "", retry: false };
   try {
-    const [srcBuf, outBuf] = await Promise.all([srcFile.arrayBuffer(), blob.arrayBuffer()]);
-    const seg = findExifSegment(srcBuf);
-    if (!seg) return blob;
+    const seg = findExifSegment(await file.arrayBuffer());
+    return seg ? { seg, note: "", retry: false }
+               : { seg: null, note: "the photo carried no EXIF to copy", retry: false };
+  } catch (err) {
+    return { seg: null, note: `couldn't read the photo's EXIF (${err.name})`, retry: true };
+  }
+}
+
+async function withExif(blob, seg, outW, outH) {
+  if (!seg) return blob;
+  try {
+    // patched on a copy, so saving twice -- or saving, rotating, and saving
+    // again with the dimensions swapped -- starts from the original each time
+    seg = seg.slice();
     patchExifSegment(seg, outW, outH);
-    const out = new Uint8Array(outBuf);
+    const out = new Uint8Array(await blob.arrayBuffer());
     const spliced = new Uint8Array(out.length + seg.length);
     spliced.set(out.subarray(0, 2), 0);                    // SOI
     spliced.set(seg, 2);                                   // our patched EXIF APP1
@@ -1681,6 +1697,14 @@ async function withExif(blob, srcFile, outW, outH) {
 const $ = id => document.getElementById(id);
 const statusEl = $("status");
 let resultCanvas = null, resultName = "cheki.jpg", sourceFile = null;
+/* The source's EXIF is lifted when the photo arrives, not when Save is tapped.
+   A file picked on Android is a content:// handle the page can lose the right
+   to read minutes later, and withExif's catch turned that into a saved photo
+   with no capture date and no complaint -- invisible until the dates were
+   looked at, weeks on. Holding ~8 KB of segment instead of a lazy handle to a
+   multi-MB file closes that window; sourceFile stays only as a retry, and
+   sourceExifNote is what the save says when there is still no date to copy. */
+let sourceExif = null, sourceExifNote = "", sourceExifRetry = false;
 let lastDetection = null;      // read by tools/webdetect.py; see runFile()
 
 const setStatus = t => { statusEl.textContent = t; };
@@ -1701,6 +1725,8 @@ async function process(file) {
   resultName = (file.name || "cheki").replace(/\.[^.]+$/, "") + "_clean.jpg";
   setStatus("reading photo…");
   await nextFrame();
+
+  ({ seg: sourceExif, note: sourceExifNote, retry: sourceExifRetry } = await readExif(file));
 
   const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
   const full = document.createElement("canvas");
@@ -1982,13 +2008,19 @@ $("rot180").addEventListener("click", () => applyRotation(rotate180));
 $("save").addEventListener("click", () => {
   if (!resultCanvas) return;
   resultCanvas.toBlob(async blob => {
-    const withDate = await withExif(blob, sourceFile, resultCanvas.width, resultCanvas.height);
+    // one retry, in case whatever stopped the first read has passed
+    if (!sourceExif && sourceExifRetry)
+      ({ seg: sourceExif, note: sourceExifNote, retry: sourceExifRetry } = await readExif(sourceFile));
+    const withDate = await withExif(blob, sourceExif, resultCanvas.width, resultCanvas.height);
     const url = URL.createObjectURL(withDate);
     const a = document.createElement("a");
     a.href = url; a.download = resultName;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
-    setStatus("saved to Downloads as " + resultName);
+    // said out loud: a saved file quietly missing its capture date is exactly
+    // the failure this whole path exists to prevent
+    setStatus("saved to Downloads as " + resultName
+              + (sourceExifNote ? " — " + sourceExifNote : ""));
   }, "image/jpeg", 0.96);
 });
 </script>

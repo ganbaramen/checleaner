@@ -31,9 +31,11 @@ each, unlike test_pipeline.py which is pure numpy.
     python3 tests/test_web.py          # standalone
     pytest tests/test_web.py           # or under pytest
 """
+import io
 import os
 import sys
 import cv2
+import piexif
 import tempfile
 import urllib.request
 import numpy as np
@@ -469,6 +471,134 @@ def test_pale_desk_is_not_croppable_by_either_implementation():
     the colour anchor rather than the geometry -- pinned here so a change that
     silently starts cropping it gets noticed."""
     assert row("pale_desk")["kind"] == "single?"
+
+
+# ------------------------------------------------------------------- saving
+
+EXIF_STAMP = b"2019:03:14 09:26:53"
+_SAVED = {}
+
+
+def _save_through_page(names):
+    """Fixtures through the real page and out through its **Save** button.
+
+    `webdetect.py --save` pulls the pixels off the canvas instead, which is the
+    right thing for a geometry sweep and no use at all here: the EXIF splice
+    lives in the save handler, so only a real download exercises it. Returns
+    {name: (saved path, the status line the page finished on)}.
+    """
+    missing = [n for n in names if n not in _SAVED]
+    if not missing:
+        return {n: _SAVED[n] for n in names}
+    if drive_page is None:
+        skip("Playwright not installed")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:                                # pragma: no cover
+        skip("Playwright not installed")
+    from tools.webdetect import PAGE, DONE
+
+    tmp = tempfile.mkdtemp(prefix="checleaner-save-")
+    paths = {n: SAVE_FIXTURES[n](os.path.join(tmp, n)) for n in missing}
+    errs = []
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            page = browser.new_page(accept_downloads=True)
+            page.on("pageerror", lambda e: errs.append(str(e)))
+            for name in missing:
+                page.goto(f"file://{PAGE}")
+                page.set_input_files("#pick", paths[name])
+                page.wait_for_function(DONE, timeout=180_000)
+                with page.expect_download() as dl:
+                    page.click("#save")
+                dst = os.path.join(tmp, dl.value.suggested_filename)
+                dl.value.save_as(dst)
+                # the download fires on the anchor click, which is *before* the
+                # handler's own setStatus -- read too early and the status line
+                # is still the one from processing
+                page.wait_for_function(
+                    "document.getElementById('status').textContent.startsWith('saved')",
+                    timeout=30_000)
+                _SAVED[name] = (dst, page.text_content("#status"))
+            browser.close()
+    except _Skip:
+        raise
+    except Exception as exc:                           # no browser downloaded, etc.
+        skip(f"could not drive checleaner.html: {exc}")
+    assert not errs, "page errors: " + "; ".join(dict.fromkeys(errs))
+    return {n: _SAVED[n] for n in names}
+
+
+def _with_exif(stem):
+    """A single card carrying the three tags the splice has to get right: a
+    capture date to preserve, an orientation to reset (the pixels are already
+    turned by the time they reach the canvas, so a surviving tag would turn the
+    saved photo a second time), and a thumbnail whose IFD has to be severed --
+    a file browser preferring it would show the uncropped original."""
+    path = stem + ".jpg"
+    rgb = make_single()
+    cv2.imwrite(path, cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    thumb = io.BytesIO()
+    Image.fromarray(rgb).resize((80, 60)).save(thumb, "JPEG")
+    piexif.insert(piexif.dump({
+        "0th": {piexif.ImageIFD.Orientation: 6,
+                piexif.ImageIFD.DateTime: EXIF_STAMP,
+                piexif.ImageIFD.Make: b"Fixture"},
+        "Exif": {piexif.ExifIFD.DateTimeOriginal: EXIF_STAMP,
+                 piexif.ExifIFD.PixelXDimension: rgb.shape[1],
+                 piexif.ExifIFD.PixelYDimension: rgb.shape[0]},
+        "GPS": {}, "1st": {}, "Interop": {},
+        "thumbnail": thumb.getvalue()}), path)
+    return path
+
+
+def _without_exif(stem):
+    path = stem + ".png"
+    cv2.imwrite(path, cv2.cvtColor(make_single(), cv2.COLOR_RGB2BGR))
+    return path
+
+
+SAVE_FIXTURES = {"exif": _with_exif, "no_exif": _without_exif}
+
+
+def test_web_save_keeps_the_capture_date():
+    """The whole point of the splice. Canvas drops EXIF, so without it every
+    phone-cleaned photo sorts to the day it was cleaned -- and the failure is
+    invisible until someone looks at the dates weeks later, which is how it was
+    actually found."""
+    path, _ = _save_through_page(["exif"])["exif"]
+    exif = piexif.load(path)
+    assert exif["Exif"].get(piexif.ExifIFD.DateTimeOriginal) == EXIF_STAMP, \
+        "DateTimeOriginal did not survive the save"
+    assert exif["0th"].get(piexif.ImageIFD.DateTime) == EXIF_STAMP
+    assert exif["0th"].get(piexif.ImageIFD.Make) == b"Fixture", \
+        "the rest of the segment should come through byte-for-byte too"
+
+
+def test_web_save_resets_orientation_and_drops_the_thumbnail():
+    """The two tags that must *not* come through unchanged, and the crop's own
+    dimensions, which must."""
+    path, _ = _save_through_page(["exif"])["exif"]
+    exif = piexif.load(path)
+    assert exif["0th"].get(piexif.ImageIFD.Orientation) == 1, \
+        "a surviving orientation turns the saved photo a second time"
+    assert not exif["1st"] and not exif["thumbnail"], \
+        "the thumbnail still shows the uncropped original"
+    assert exif["Exif"].get(piexif.ExifIFD.PixelXDimension) == OUT_W
+    assert exif["Exif"].get(piexif.ExifIFD.PixelYDimension) == OUT_H
+    assert Image.open(path).size == (OUT_W, OUT_H), \
+        "the spliced file must still decode as the crop it claims to be"
+
+
+def test_web_save_says_so_when_there_is_no_date_to_copy():
+    """A saved photo quietly missing its capture date is exactly the failure the
+    splice exists to prevent, so when there is nothing to splice the save says
+    which -- silence reads identically to success."""
+    path, status = _save_through_page(["no_exif"])["no_exif"]
+    assert Image.open(path).size == (OUT_W, OUT_H), "the file must still save"
+    assert not piexif.load(path)["Exif"], "there was no EXIF to invent"
+    assert "EXIF" in status, f"the save said nothing about the missing date: {status!r}"
 
 
 # ------------------------------------------------------------------ runner

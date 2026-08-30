@@ -105,7 +105,10 @@ whose thresholds are calibrated against different pixels, and whose segmentation
 does not always produce the same blob from the same photo. It builds the same fixtures, pushes them through the
 real page under Playwright, and asserts on classification, crop geometry, the
 colour targets **measured on the app's own output canvas**, the glare handling
-and orientation. Same commands; it skips cleanly when Playwright isn't
+and orientation. Three of its tests drive the page to a real **download**
+instead, because the EXIF splice lives in the save handler and nothing else
+reaches it — `webdetect.py --save` pulls pixels off the canvas and never presses
+Save. Same commands; it skips cleanly when Playwright isn't
 installed, so `pytest tests/` is safe either way — but it costs a browser launch
 and a page load per fixture (~35 s) against test_pipeline's pure numpy.
 

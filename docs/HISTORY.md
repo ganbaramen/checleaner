@@ -1611,6 +1611,66 @@ ships. `tests/test_web.py` uses it for two new tests, skipped when the CDN is
 unreachable, covering both halves of the contract — the five known-sideways
 frames get stood up, and the frames already upright are left alone.
 
+## 2026-08-30 — the saved photo's capture date, and why it went missing
+
+Reported: of three photos cleaned on the phone the same evening, one came out
+with the wrong timestamp and two were fine. The splice itself turned out not to
+be the fault. Replaying `findExifSegment`/`patchExifSegment` byte-for-byte over
+**all 145 sources in the library** found 0 failures — every one keeps its
+`DateTimeOriginal` — and driving the three reported photos through the real page
+and its own Save button produced three files with the right date, orientation
+reset and thumbnail severed. The bug is not in reading the EXIF; it is in
+*when*.
+
+`withExif` was handed `sourceFile` and read it lazily at save time:
+
+```js
+const [srcBuf, outBuf] = await Promise.all([srcFile.arrayBuffer(), ...]);
+```
+
+That read can be minutes after the photo was picked. On Android a picked file is
+a `content://` handle, and the page can lose the right to read it in between —
+the tab is backgrounded, the provider revokes, the photo moves. `arrayBuffer()`
+then rejects, `withExif`'s catch returns the un-spliced blob, and the file saves
+with **no EXIF and no complaint**. Two photos saved promptly keep their date;
+one saved after a detour doesn't. That is exactly the reported shape, and it
+cannot be reproduced from a desktop `file://` picker, which is why the local
+copies all round-trip cleanly.
+
+Two changes:
+
+- **The segment is lifted when the photo arrives**, in `process()`, alongside
+  the decode that already reads the file. What survives to save time is ~8 KB of
+  APP1 rather than a lazy handle to a multi-MB file. `sourceFile` is kept only
+  for a single retry, in case whatever blocked the first read has passed.
+- **The save says when there is no date to copy.** Silence read identically to
+  success here — the failure was invisible until someone looked at the dates
+  weeks later. The status line now distinguishes "the photo carried no EXIF to
+  copy" from "couldn't read the photo's EXIF (NotReadableError)", because only
+  the second is a fault.
+
+`patchExifSegment` also works on a copy of the segment now, so save → rotate →
+save again starts from the original tags each time instead of the once-patched
+ones.
+
+### The path had no test at all
+
+The 2026-08-16 entry above verified this by hand and said so; nothing pinned it
+afterwards, and `webdetect.py --save` pulls pixels off the canvas, so it never
+touches the save handler. Three tests in `tests/test_web.py` now drive the page
+to a real **download**: the capture date and the rest of the segment survive;
+orientation is reset, the thumbnail IFD severed and the crop's own dimensions
+written; and a source with no EXIF still saves, with the status saying so.
+
+Mutation-checked, one at a time, per the rule that a test nobody has watched
+fail is not yet a test: skipping the splice fires the first two; leaving
+orientation alone or keeping the thumbnail IFD fires the second only; dropping
+the status note fires the third; and restoring the lazy read fires all three.
+The first attempt at these tests was itself flaky — the download event fires on
+the anchor click, which is *before* the handler's `setStatus`, so the status
+assertion raced and failed under unrelated mutations. It now waits for the line
+to settle.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
