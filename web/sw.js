@@ -2,7 +2,7 @@
    Two jobs: keep the app usable offline once installed, and receive an image
    shared to it from the Android share sheet (Web Share Target). Bump VERSION
    to force clients onto a new app shell. */
-const VERSION = "checleaner-v3";
+const VERSION = "checleaner-v4";
 // Pinned exactly: the app hard-codes the same version, and an unpinned runtime
 // could change decode behaviour under a cached model without anything here
 // noticing. Only these two files are ever fetched -- verified by watching the
@@ -73,11 +73,18 @@ self.addEventListener("fetch", (e) => {
   }
   if (url.origin !== self.location.origin) return;
 
-  // Navigations network-first (an online visit picks up a new deploy), cache offline.
+  /* Navigations network-first (an online visit picks up a new deploy), cache
+     offline -- keyed by *which* page, which matters now that two live under this
+     worker. Keying every navigation to "./" meant an online visit to focusmerge
+     overwrote the cached Checleaner shell with it, and an offline visit to
+     focusmerge served Checleaner. Both silently: the app opens, it is simply the
+     wrong one. */
   if (req.mode === "navigate") {
+    const page = url.pathname.endsWith("/focusmerge.html") ? "./focusmerge.html" : "./";
     e.respondWith(fetch(req)
-      .then(r => { const c = r.clone(); caches.open(VERSION).then(k => k.put("./", c)).catch(() => {}); return r; })
-      .catch(() => caches.match("./", { ignoreSearch: true }).then(r => r || caches.match("./index.html"))));
+      .then(r => { const c = r.clone(); caches.open(VERSION).then(k => k.put(page, c)).catch(() => {}); return r; })
+      .catch(() => caches.match(page, { ignoreSearch: true })
+        .then(r => r || (page === "./" ? caches.match("./index.html") : undefined))));
     return;
   }
 
