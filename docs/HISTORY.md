@@ -1833,6 +1833,122 @@ steady, the scatter reaches 3.4 px, and the movement check cries wolf on a still
 desk. That is a property of the fixture, not of the tool, and shrinking the fixture
 to save a few seconds would have bought a false alarm instead.
 
+## 2026-09-03 — focusmerge on the phone, as a page of its own
+
+`focusmerge.html`, published beside `checleaner.html` by the same Pages workflow.
+Not a mode inside the app: the app works on a 1100 px analysis copy and **defocus
+does not survive the trip**, so the one thing sharing it would have bought is the
+one thing that cannot be shared. Scaled to 1100 px, 7 of the reference pair's 13
+prints have a sharpness ratio under 1.3 between the sharp and the soft shot, a
+coin flip, against 1 of 13 at full resolution. Computing the weights there and
+upscaling — the obvious way to make it affordable on a phone — took the worst
+print from 96.3% to **69.8%**.
+
+What is affordable is reducing the decision *after* measuring it: sharpness at
+full resolution, the weight grid at 400 px. On the desktop tool a 275 px grid
+moves the worst print by 0.2 points. Two 12 Mpx frames merge inside about 200 MB.
+
+The page reaches **95.7%** of the best frame on the worst print and 99.9% on
+average, against the desktop tool's 96.9% and 100.5% — with ORB instead of SIFT,
+a hand-written FFT instead of cv2's, and a bicubic warp instead of Lanczos.
+
+### The feasibility question turned out backwards
+
+SIFT looked like the blocker and wasn't. ORB registers the reference pair
+*better* — 0.78 px median residual against SIFT's 0.88, at an eighth of the cost —
+and is FAST corners plus a binary descriptor, which fits in a page. What is
+actually hard is that the focus decision cannot be made on a downscaled frame,
+which is a memory problem rather than an algorithm one.
+
+ORB does have a real limit SIFT does not, and it is now measured and pinned: it
+matches a pattern of pixel comparisons, so a razor-sharp patch and a heavily
+defocused one do not match. The page registers up to about a **5× sharpness
+ratio** between frames and refuses past it; SIFT still merges at 26×. The
+reference pair sits at 2.5×. Past the limit the page *refuses* rather than
+merging frames it failed to line up — which is the behaviour that matters, and
+`test_page_refuses_frames_too_far_apart_in_focus` pins it. `test_focusmerge.py`'s
+fixture had to grow a `blur` parameter so the two suites can use the defocus each
+implementation is meant to handle.
+
+### Four bugs that existed only here
+
+- **FAST-9's compass pre-test used the FAST-12 threshold.** Nine consecutive of
+  sixteen always contain at least *two* of the four compass points, not three.
+  With three, the corner of a square is rejected outright — the drawn-square test
+  returned no corners at all.
+- **The parabolic peak formula had its sign inverted**, which reads as every
+  half-pixel shift coming out a whole pixel wrong. Replaced with a 3×3 weighted
+  centroid: 0.08 px mean error against known shifts, 0.24 px worst. A 5×5 window
+  is more than twice as bad (0.20 / 0.51) — it reaches into the correlation
+  peak's asymmetric side lobes — and 9×9 worse still.
+- **The Laplacian lost its pre-blur in the port.** Undefocused, the pixel-scale
+  term is noise, which both frames carry equally, so it adds a constant to both
+  and squeezes the ratio the blend decides on toward 1. Worse, it is not even
+  constant: a frame resampled into the reference's grid has had its noise
+  smoothed away, so the reference wins on grain alone. The split came out 72/28
+  where it should be 60/40, and the worst print kept 78%.
+- **The page required the frames be the same size**, which the reference pair
+  are not — they differ by 141 px. The warp samples each frame in its own
+  coordinates and writes into the reference's grid, so the check was inventing a
+  constraint the maths does not have.
+
+### The movement check needed a rule the desktop tool does not
+
+Thirteen near-identical cards give a tile several plausible correlation peaks,
+and six came back 8–49 px out on a desk where nothing had moved. Response cannot
+separate those from good tiles: they scored 8.2–22.6 against 9.9–95.5, which
+overlaps far too much to threshold. What separates them is **company**. A print is
+582 × 923 px against a 256 px tile, so a moved one takes several adjacent tiles
+with it and they all report the same displacement; a wrong peak is alone and
+agrees with nobody. An outlier is movement only if a neighbour is also out and
+shifts the same way — otherwise it is merely unreliable, dropped from the field it
+would have distorted and not announced as something it isn't.
+
+### Also measured
+
+- **Bilinear is not an option.** Warping the reference pair with it costs
+  **10.8%** of the sharpness the page exists to preserve; bicubic sits within 3%
+  of Lanczos and is what the page uses, in a single pass that composes the
+  homography with the refinement rather than resampling twice.
+- **N frames work, and were verified rather than assumed** — three shots with
+  three different focus bands, each contributing, each band keeping 99.8% of the
+  best frame available there. An earlier reading of that experiment said the
+  extra frames lost 9–15%; that was wrong, and came of comparing card boxes in
+  the output's coordinates against each raw frame in its own. Measured
+  like-for-like, two Lanczos resamples cost **0.7%**.
+
+### Tests
+
+`tests/test_webfocus.py`, ten of them, driven through the real page by
+`tools/webfocus.py`, with an opt-in tier on the real pair. Mutation-checked, per
+the rule that a test nobody has watched fail is not yet a test — nine breakages,
+each firing a test that names what broke:
+
+| broken | fires |
+|---|---|
+| sharpness loses its pre-blur | real pair |
+| blend stops picking (flat average) | sharp side, real pair |
+| exposure gains computed but never used | exposure match |
+| warp drops to bilinear | sharp side, real pair |
+| `MIN_INLIERS` → 1 | refuses a stranger, refuses too-soft frames |
+| `MOVE_TOL` → 900 (never fires) | reports a print that moved |
+| every outlier called movement (no company rule) | real pair |
+| FAST pre-test back to the N=12 threshold | the page's maths |
+| sub-pixel peak reverts to whole-pixel | the page's maths |
+
+The last two are why `test_the_pages_maths_hold_up` exists: both survived being
+wrecked while every end-to-end merge still came out fine, which means those
+merges were passing for reasons other than the code being right.
+
+One knob is deliberately **not** pinned. `BLEND_SIGMA` is what stops a seam
+landing on a card edge in the desktop tool; on the page the decision grid is
+coarse (400 px for a 3379 px frame) and a bilinear read of it already spreads any
+switch over ~8 full-resolution pixels, so the pixel-scale patchwork the constant
+exists to prevent cannot form. Turning it off moves the worst print by 1.4 points
+— in the *better* direction, as it does in Python — and 1% of pixels by more than
+4/255. It stays for the day the grid gets finer, and the comment says so rather
+than a test pretending otherwise.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

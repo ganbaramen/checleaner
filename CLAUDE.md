@@ -13,6 +13,8 @@ for what has already been processed and what the numbers came out at.
 checleaner/
   checleaner.py          batch CLI (desktop) — the reference implementation
   checleaner.html        single-file phone app, same pipeline ported to JS
+  focusmerge.html        single-file phone page for tools/focusmerge.py — a
+                           separate page, not a mode of the app (see below)
   CLAUDE.md              this file
   README.md              project overview
   docs/PIPELINE.md       the algorithm, why each step is the way it is
@@ -22,9 +24,11 @@ checleaner/
   tools/orientcheck.py   scores an orientation estimator against report.csv's own answers
   tools/focusmerge.py    merges several shots of one unmoved layout into one, keeping
                            whichever frame is in focus where — run by hand, before a run
+  tools/webfocus.py      the same, for focusmerge.html — drives the page under Playwright
   tests/test_pipeline.py regression tests for checleaner.py
   tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
   tests/test_focusmerge.py  regression tests for tools/focusmerge.py
+  tests/test_webfocus.py    the same, for focusmerge.html — drives the page under Playwright
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
   web/face_detection_yunet_2023mar.onnx  the face model, MIT, identical to checleaner.py's
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
@@ -156,6 +160,24 @@ Its one silent failure is a print that was *moved* between shots — it aligns
 nowhere and ghosts, while every other number in the report still looks fine — so
 that is checked for and reported. Believe the warning: the check was calibrated
 against a 1.22 px worst case on a still desk, so it does not fire idly.
+
+`focusmerge.html` is the same job on the phone, and it is a **separate page on
+purpose** — do not fold it into `checleaner.html`. The app does everything on a
+1100 px analysis copy and defocus does not survive that: 7 of the reference
+pair's 13 prints drop under a 1.3× sharpness ratio there, against 1 of 13 at full
+resolution. The only thing sharing the app would have bought is the only thing
+that cannot be shared. `tools/webfocus.py` drives it the way `webdetect.py`
+drives the app; `?debug` on the URL keeps the aligned frames for calibration.
+
+Its numbers are calibrated against its own decoder, like the app's, and it is
+**not the same algorithm**: ORB rather than SIFT, a hand-written FFT, a bicubic
+warp. One difference is load-bearing and pinned by a test — ORB tolerates about
+a 5× sharpness ratio between frames where SIFT manages 26×, and past that the
+page must *refuse* rather than merge frames it could not line up. The reference
+pair sits at 2.5×. See `docs/PIPELINE.md` § On the phone before touching any of
+it, and note that the EXIF helpers are **duplicated** from `checleaner.html`:
+both pages are single files with no build step to factor anything into, so if
+one copy changes, change both.
 
 **Adopting a merge** means the batch should hold it *instead of* its inputs, or
 the same prints get balanced three times and one shoot gets three votes in the

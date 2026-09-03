@@ -1025,6 +1025,86 @@ Two things that do not take care of themselves:
   in place of `.MP.jpg` keeps the reference's timestamp — which is also what its
   EXIF now says — while staying a distinct name.
 
+### On the phone: `focusmerge.html`
+
+A page of its own, not a mode inside `checleaner.html`, and the reason is
+measured rather than stylistic. That app does all its work on a 1100 px analysis
+copy, and **defocus does not survive the trip**. Scaled down, the two shots stop
+being distinguishable:
+
+| analysis size | A1 ratio | C5 ratio | median over 13 | prints under a 1.3× ratio |
+|---|---|---|---|---|
+| 3379 (full) | 2.50 | 2.47 | 1.85 | **1 of 13** |
+| 1400 | 1.62 | 1.95 | 1.44 | 5 of 13 |
+| **1100 (the app's)** | 1.40 | 1.66 | 1.28 | **7 of 13** |
+| 800 | 1.18 | 1.33 | 1.16 | 10 of 13 |
+
+The one thing sharing the app would have bought is the one thing that cannot be
+shared. Computing the weights on that frame and upscaling them — the obvious way
+to make this affordable on a phone — drops the worst print from 96.3% to 69.8%.
+
+What *can* be cheap is the decision **grid**: measure sharpness at full
+resolution, then reduce it. On the desktop tool, computing the weight map at
+275 px moves the worst print by 0.2 points. So the expensive half runs on every
+pixel and the cheap half does not, which is what keeps a merge inside about
+200 MB for two 12 Mpx frames.
+
+**ORB, not SIFT.** SIFT cannot be written in a page of this size; ORB is FAST
+corners plus a steered binary descriptor, and on the reference pair it registers
+*better* — 0.78 px median residual against SIFT's 0.88, at an eighth of the cost.
+Three things about it are worth knowing because each cost a bug:
+
+- FAST-9's compass pre-test needs **two** of the four points to agree, not three.
+  Three is the FAST-12 rule, and it rejects the corner of a square outright — a
+  drawn square returned no corners at all.
+- The sub-pixel peak is a **3×3 weighted centroid**: 0.08 px mean error against
+  known shifts, 0.24 px worst. A 5×5 window is more than twice as bad (0.20 /
+  0.51) because it reaches into the correlation peak's asymmetric side lobes. A
+  parabola is comparable but divides by a curvature that can vanish, and its
+  textbook form is easy to write with the sign inverted — which reads as every
+  half-pixel shift coming out a whole pixel wrong.
+- **ORB tolerates far less defocus difference than SIFT.** It matches a pattern
+  of pixel comparisons, and a razor-sharp patch does not produce the same pattern
+  as a heavily blurred one. Measured on the fixture, the page registers up to
+  about a **5× sharpness ratio** between frames and refuses past it; SIFT still
+  merges at 26×. The reference pair sits at 2.5×, so this is head-room rather
+  than a wall — and past the limit the page *refuses* rather than merging frames
+  it failed to line up, which is the part that matters and is pinned by a test.
+
+**The warp is one pass, not two.** Python warps by the homography and then remaps
+by the refinement; a hand-written warp composes them and samples once. It must be
+**bicubic**: measured on the reference pair, bilinear throws away **10.8%** of the
+sharpness the page exists to preserve, while bicubic sits within 3% of Lanczos.
+
+**The Laplacian needs its pre-blur, and this is the one to remember.** Undefocused,
+the pixel-scale term is *noise*, which every frame carries equally — so an
+unblurred Laplacian adds a constant to both and squeezes the ratio the blend
+decides on toward 1. Worse, it is not even constant: a frame resampled into the
+reference's grid has had its noise smoothed away, so the reference wins on grain
+alone. Leaving it out put the split at 72/28 where it should be 60/40 and cost
+the worst print 22%.
+
+**The movement check needed a rule the desktop tool does not.** Thirteen
+near-identical cards give a tile several plausible correlation peaks, and six of
+them came back 8–49 px out on a desk where nothing had moved. Response cannot
+separate those from good tiles — they scored 8.2–22.6 against 9.9–95.5, which
+overlaps far too much to threshold. What separates them is *company*: a print is
+582 × 923 px against a 256 px tile, so a moved one takes several adjacent tiles
+with it and they all report the same displacement, while a wrong peak is alone
+and agrees with nobody. An outlier is movement only if a neighbour is also out
+and shifts the same way; otherwise it is merely unreliable, dropped from the
+field it would have distorted and not announced as something it isn't.
+
+The result: the page keeps **95.7%** of the best frame on the worst of the
+thirteen prints and 99.9% on average, against the desktop tool's 96.9% and
+100.5% — on a different feature detector, a different FFT and a different
+resampler.
+
+`tools/webfocus.py` drives the page headlessly, the way `tools/webdetect.py`
+drives the app. `?debug` on the URL makes it retain the aligned frames and the
+decision grid for calibration; without it they are released with the merge,
+because they are the largest thing on the page.
+
 ### Limits
 
 - **The prints must not move.** The camera may move freely; that is what step 1 is

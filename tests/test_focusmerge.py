@@ -105,7 +105,10 @@ def _cards(rng, moved=None):
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def _soften(img, mask):
+DEFOCUS = 2.2      # sigma of the fixture's out-of-focus half, in linear light
+
+
+def _soften(img, mask, sigma=DEFOCUS):
     """Defocus `img` where mask is 1, sharp where it is 0, smoothly between --
     a focal plane crossing the desk, which is what makes one shot insufficient.
 
@@ -116,7 +119,7 @@ def _soften(img, mask):
     and that read as the merge shifting tone.
     """
     lin = to_linear(img)
-    blurred = cv2.GaussianBlur(lin, (0, 0), 2.2)
+    blurred = cv2.GaussianBlur(lin, (0, 0), sigma)
     m = mask[:, :, None]
     return to_srgb(np.clip(lin * (1 - m) + blurred * m, 0, 1)).round().astype(np.uint8)
 
@@ -160,19 +163,22 @@ def _pose(img, dx=17.0, dy=-11.0, scale=1.012, rot=0.4):
 EXPOSURE = 1.06     # frame 2 is a touch brighter, as two hand-held shots are
 
 
-def make_pair(moved=None, seed=4, distort=True, exposure=EXPOSURE, dx=17.0):
+def make_pair(moved=None, seed=4, distort=True, exposure=EXPOSURE, dx=17.0,
+              blur=DEFOCUS):
     """Two shots of one desk: frame 1 sharp on the left, frame 2 sharp on the
     right, taken from slightly different positions. Returns (frame1, frame2).
 
     `dx` is how far the camera moved sideways; a big one pushes whole tiles off
-    the edge of the second shot, which is what the coverage test is for.
+    the edge of the second shot, which is what the coverage test is for. `blur`
+    is how hard the defocus bites -- tests/test_webfocus.py turns it down,
+    because ORB tolerates far less of a difference than SIFT does.
     """
     rng = np.random.default_rng(seed)
     scene = _cards(rng)
     other = _cards(np.random.default_rng(seed), moved=moved) if moved else scene
     ramp = _ramp(scene.shape[:2])
-    f1 = _soften(scene, ramp)                    # right half soft
-    f2 = _soften(other, 1 - ramp)                # left half soft
+    f1 = _soften(scene, ramp, blur)              # right half soft
+    f2 = _soften(other, 1 - ramp, blur)          # left half soft
     f2 = _pose(f2, dx=dx)
     if distort:
         f2 = _barrel(f2)

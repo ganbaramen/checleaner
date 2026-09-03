@@ -1,13 +1,13 @@
-# Publishes checleaner.html (the phone app) to GitHub Pages over HTTPS.
-# The single source of truth stays checleaner.html at the repo root; this only
-# assembles it plus the PWA assets in web/ into the published site, so there is
-# no second copy to keep in sync.
+# Publishes the two phone pages to GitHub Pages over HTTPS: checleaner.html as
+# the site root, and focusmerge.html alongside it. The single source of truth
+# stays the files at the repo root; this only assembles them plus the PWA assets
+# in web/ into the published site, so there is no second copy to keep in sync.
 name: Deploy Pages
 
 on:
   push:
     branches: [main]
-    paths: [checleaner.html, web/**, .github/workflows/pages.yml]
+    paths: [checleaner.html, focusmerge.html, web/**, .github/workflows/pages.yml]
   workflow_dispatch:
 
 permissions:
@@ -31,7 +31,9 @@ jobs:
         run: |
           mkdir -p _site
           cp checleaner.html _site/index.html
-          cp web/manifest.webmanifest web/sw.js web/icon-192.png web/icon-512.png web/apple-touch-icon.png _site/
+          cp focusmerge.html _site/focusmerge.html
+          cp web/manifest.webmanifest web/focusmerge.webmanifest web/sw.js _site/
+          cp web/icon-192.png web/icon-512.png web/apple-touch-icon.png _site/
           # YuNet, MIT (Shiqi Yu), byte-identical to the model checleaner.py uses
           cp web/face_detection_yunet_2023mar.onnx _site/
       - uses: actions/upload-pages-artifact@v3

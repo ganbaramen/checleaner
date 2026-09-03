@@ -1,0 +1,1336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<!-- PWA: present only when hosted (see .github/workflows/pages.yml); harmless on file:// -->
+<link rel="manifest" href="focusmerge.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Focusmerge">
+<title>Focusmerge</title>
+<style>
+  :root{
+    --bg:#14110f; --card:#1e1a17; --line:#332c27; --ink:#f2ece6;
+    --dim:#a1948a; --accent:#e8b17a; --warn:#e0a33c; --ok:#7fc99a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    -webkit-text-size-adjust:100%}
+  body{padding:20px 16px calc(28px + env(safe-area-inset-bottom));max-width:640px;margin:0 auto}
+  h1{font-size:20px;margin:0 0 2px;letter-spacing:-.01em}
+  .sub{color:var(--dim);font-size:13px;margin:0 0 20px}
+  button{font:inherit;font-weight:600;border:0;border-radius:14px;padding:16px 20px;width:100%;
+    background:var(--accent);color:#241a10;cursor:pointer;-webkit-tap-highlight-color:transparent}
+  button:disabled{opacity:.4}
+  .row{display:flex;gap:10px;margin-top:10px}
+  .row button{margin:0}
+  label.file{display:block}
+  label.file input{display:none}
+  label.file span{display:block;text-align:center;font-weight:600;border-radius:14px;padding:16px 20px;
+    background:var(--accent);color:#241a10}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:16px}
+  .stage{margin-top:18px;display:none}
+  .stage.on{display:block}
+  canvas{width:100%;height:auto;display:block;border-radius:10px;background:#000}
+  .pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .pair figcaption{font-size:11px;color:var(--dim);text-align:center;margin-top:6px;
+    text-transform:uppercase;letter-spacing:.08em}
+  figure{margin:0}
+  .status{color:var(--dim);font-size:14px;min-height:22px;margin-top:14px}
+  .flag{display:flex;gap:8px;align-items:flex-start;font-size:14px;margin-top:8px;color:var(--warn)}
+  .flag.ok{color:var(--ok)}
+  .flag b{flex:0 0 auto}
+  table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+  td{padding:4px 0;border-bottom:1px solid var(--line);color:var(--dim)}
+  td:last-child{text-align:right;color:var(--ink)}
+  tr:last-child td{border-bottom:0}
+  .frame{font-size:13px;padding:6px 0;border-bottom:1px solid var(--line);color:var(--dim)}
+  .frame:last-child{border-bottom:0}
+  .frame b{color:var(--ink);font-weight:600}
+  .frame.bad b{color:var(--warn)}
+  .hint{color:var(--dim);font-size:12px;margin-top:10px;line-height:1.45}
+</style>
+</head>
+<body>
+
+<h1>Focusmerge</h1>
+<p class="sub">Combines several shots of the same, unmoved prints into one that is
+in focus everywhere. Run it before Checleaner.</p>
+
+<label class="file">
+  <input type="file" id="pick" accept="image/*" multiple>
+  <span>Choose two or more shots</span>
+</label>
+
+<div class="status" id="status"></div>
+
+<div class="stage" id="stage">
+  <div class="pair">
+    <figure><canvas id="before"></canvas><figcaption>first shot</figcaption></figure>
+    <figure><canvas id="after"></canvas><figcaption>merged</figcaption></figure>
+  </div>
+  <div class="card" id="frames"></div>
+  <div class="card"><table id="stats"></table></div>
+  <div class="row"><button id="save">Save</button></div>
+  <p class="hint">Save writes a JPEG carrying the first shot's EXIF, including its
+  capture date. Feed that file to Checleaner as an ordinary photo.</p>
+</div>
+
+<script>
+"use strict";
+/* Focusmerge -- a port of tools/focusmerge.py to the phone, as a page of its own.
+
+   Not folded into checleaner.html, for a reason that is measured rather than
+   stylistic: that app does all its work on a 1100 px analysis copy, and defocus
+   does not survive the trip. Scaled to 1100 px, 7 of the 13 prints in the
+   reference pair have a sharpness ratio under 1.3 between the sharp and soft
+   shot -- a coin flip -- against 1 of 13 at full resolution. The one thing
+   sharing the app would have bought is the one thing that cannot be shared, so
+   this page keeps its own full-resolution path and its own contract.
+
+   What is here, and why it is not simply the Python:
+
+   - Features are ORB, not SIFT. SIFT is not implementable in a page of this
+     size; ORB is FAST corners plus a steered binary descriptor, and measures
+     as well on the reference pair -- 0.78 px median residual against SIFT's
+     0.88 (docs/PIPELINE.md § Merging several shots).
+   - The warp is one pass, not two. Python warps by the homography and then
+     remaps by the refinement; composing them into a single sample is what a
+     hand-written warp does naturally, and it resamples once instead of twice.
+   - Every threshold below is calibrated against *this* decoder. Canvas decoding
+     is not cv2's, and the repo's rule is that ported numbers are re-measured
+     rather than copied.
+
+   Colour is not this page's business. The merge picks pixels and moves them; it
+   never changes a tone beyond matching the frames' exposure to the first one, so
+   the file it writes measures like an ordinary photograph of the same desk and
+   goes through Checleaner unchanged. */
+
+/* ================================================================ constants */
+
+// Working budget in megapixels *summed over the frames*. A Pixel 7 shoots
+// 12.5 Mpx, so three of those is 37 Mpx and about 150 MB of RGBA held at once,
+// plus the output and one scratch plane. Past this the frames are scaled down
+// together -- and the page says so, because a quiet downscale would show up
+// later as a merge that inexplicably preserved less.
+const MAX_TOTAL_MPX = 40;
+
+// ORB. The pattern is 256 pairs, so a descriptor is 8 x Uint32.
+const ORB_FEATURES   = 4000;   // per frame, kept by corner score
+const FAST_T         = 18;     // FAST-9 brightness difference, 0-255
+const ORB_PATCH      = 31;     // BRIEF sampling window, and the orientation patch
+const MATCH_RATIO    = 0.80;   // Lowe's ratio; looser than SIFT's 0.75, as binary
+                               // descriptors sit closer together than float ones
+const MIN_INLIERS    = 40;     // below this the homography is a guess, not a fit.
+                               // The reference pair reaches ~1300.
+const RANSAC_PX      = 3.0;
+const RANSAC_ROUNDS  = 2000;
+
+// Local refinement. Tiles are a fixed 256 px square so the FFT can be radix-2,
+// laid on a 10 x 10 grid of centres like the Python's.
+const REFINE_GRID    = 10;
+const TILE           = 256;
+const REFINE_RESP    = 0.10;   // phase-correlation peak ratio below this = no answer.
+                               // Not cv2's number: this is a plain peak-to-mean,
+                               // measured on this page's own tiles.
+const REFINE_MIN_SD  = 3.0;    // flat desk has nothing to correlate
+const SHIFT_MAX      = 60.0;
+const MOVE_TOL       = 3.0;    // px off the smooth field before a tile is called moved
+
+// Exposure match, and the blend.
+const GAIN_BLUR      = 8.0;    // px, at full resolution
+const SHARP_WIN      = 41;     // px box on the squared Laplacian of log luminance
+const WEIGHT_GRID    = 400;    // long edge the blend decision is computed on. The
+                               // *decision* is smooth by construction, so it costs
+                               // nothing to make it small -- verified against the
+                               // desktop tool, where dropping the weight map to
+                               // 275 px moved the worst print by 0.2 points. It is
+                               // measuring sharpness at low resolution that fails,
+                               // and that still happens at full size.
+const BLEND_SIGMA    = 25.0;   // in full-resolution px; scaled to the grid below.
+                               // Less load-bearing here than in the desktop tool:
+                               // WEIGHT_GRID is coarse, and a bilinear read of it
+                               // already spreads any switch over ~8 full-res px, so
+                               // the pixel-scale patchwork this exists to prevent
+                               // cannot form. Turning it off moves the reference
+                               // pair's worst print by 1.4 points and 1% of pixels
+                               // by more than 4/255. It stays for the day the grid
+                               // gets finer, not because it is doing much today.
+const BLEND_SHARPNESS = 12.0;
+
+/* ============================================================ colour space */
+
+/* sRGB 0-255 -> linear 0-1, as a table: the blend touches every pixel of every
+   frame, and pow() per channel per frame is the difference between a merge that
+   feels instant and one that looks hung. */
+const LIN = new Float32Array(256);
+for (let i = 0; i < 256; i++) {
+  const x = i / 255;
+  LIN[i] = x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+}
+function toSrgb8(v) {
+  if (!(v > 0)) return 0;
+  if (v >= 1) return 255;
+  const s = v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+  return Math.max(0, Math.min(255, Math.round(s * 255)));
+}
+
+/* Luminance of an RGBA buffer, in linear light, as a Float32Array. Everything
+   that measures -- corners, correlation, sharpness -- reads this rather than the
+   bytes, so a frame's exposure enters the maths once and in one place. */
+function luma(rgba, w, h) {
+  const out = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < out.length; i++, p += 4)
+    out[i] = 0.114 * LIN[rgba[p]] + 0.587 * LIN[rgba[p + 1]] + 0.299 * LIN[rgba[p + 2]];
+  return out;
+}
+
+/* The same, scaled to 0-255 gamma-ish, for the corner detector. FAST thresholds
+   are defined on display values; feeding it linear light makes every shadow
+   flat and the corner count collapses. */
+function grayBytes(rgba, w, h) {
+  const out = new Uint8Array(w * h);
+  for (let i = 0, p = 0; i < out.length; i++, p += 4)
+    out[i] = (rgba[p] * 29 + rgba[p + 1] * 150 + rgba[p + 2] * 77) >> 8;
+  return out;
+}
+
+/* ================================================================ box blur */
+
+/* Separable box blur, repeated three times, which is the standard cheap stand-in
+   for a Gaussian (three passes are within a couple of percent of one). Used for
+   the sharpness window and for the blend decision; both want a wide kernel, and
+   a true Gaussian at sigma 25 would be a 150-tap convolution per pixel. */
+function boxBlur(src, w, h, radius, passes = 3) {
+  let a = Float32Array.from(src), b = new Float32Array(w * h);
+  for (let p = 0; p < passes; p++) {
+    blurT(a, b, w, h, radius);   // w x h -> h x w, blurred along x
+    blurT(b, a, h, w, radius);   // and back, which blurs along the original y
+  }
+  return a;
+}
+/* One row pass that writes its result *transposed*, so calling it twice does
+   rows then columns with a single code path -- and both passes walk their input
+   sequentially, which a strided column pass would not. */
+function blurT(src, dst, w, h, r) {
+  const n = 2 * r + 1;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    let sum = 0;
+    for (let i = -r; i <= r; i++) sum += src[row + Math.min(w - 1, Math.max(0, i))];
+    for (let x = 0; x < w; x++) {
+      dst[x * h + y] = sum / n;
+      sum += src[row + Math.min(w - 1, x + r + 1)] - src[row + Math.max(0, x - r)];
+    }
+  }
+}
+
+/* ============================================================== ORB features */
+
+/* FAST-9: a pixel is a corner when nine or more of the sixteen on a radius-3
+   circle are all brighter, or all darker, than it by FAST_T. The two-stage test
+   (four compass points first) is not an optimisation for its own sake -- the
+   full test runs on well under a tenth of the frame after it, and a 12 Mpx photo
+   is 12 million of these. */
+const FAST_CIRCLE = [[0,-3],[1,-3],[2,-2],[3,-1],[3,0],[3,1],[2,2],[1,3],
+                     [0,3],[-1,3],[-2,2],[-3,1],[-3,0],[-3,-1],[-2,-2],[-1,-3]];
+
+function fastCorners(g, w, h, t = FAST_T) {
+  const off = FAST_CIRCLE.map(([dx, dy]) => dy * w + dx);
+  const m = 16;                                   // margin: circle plus the BRIEF patch
+  const score = new Float32Array(w * h);
+  const found = [];
+  const ring = new Int32Array(16);
+  for (let y = m; y < h - m; y++) {
+    for (let x = m; x < w - m; x++) {
+      const i = y * w + x, p = g[i];
+      const hi = p + t, lo = p - t;
+      /* Compass pre-test: nine consecutive of sixteen always contain at least
+         *two* of the four points at 0, 4, 8, 12, so fewer than two agreeing
+         rules a corner out. Two, not three -- three is the test for FAST-12,
+         and using it here rejects the corner of a square outright, where two of
+         the compass points fall on each side of the edge. That is how it was
+         found: a drawn square returned no corners at all. */
+      let nb = 0, nd = 0;
+      for (let k = 0; k < 16; k += 4) {
+        const v = g[i + off[k]];
+        if (v > hi) nb++; else if (v < lo) nd++;
+      }
+      if (nb < 2 && nd < 2) continue;
+      for (let k = 0; k < 16; k++) ring[k] = g[i + off[k]];
+      let run = 0, best = 0;
+      for (let pass = 0; pass < 2; pass++) {
+        const want = pass === 0 ? 1 : -1;
+        run = 0;
+        for (let k = 0; k < 24; k++) {             // 24 = wrap far enough for a run of 9
+          const v = ring[k & 15];
+          const ok = want > 0 ? v > hi : v < lo;
+          run = ok ? run + 1 : 0;
+          if (run >= 9) { best = 1; break; }
+        }
+        if (best) break;
+      }
+      if (!best) continue;
+      let sc = 0;
+      for (let k = 0; k < 16; k++) sc += Math.abs(ring[k] - p);
+      score[i] = sc;
+      found.push(i);
+    }
+  }
+  // 3x3 non-maximum suppression, so a single corner is not returned nine times
+  const kept = [];
+  for (const i of found) {
+    const s0 = score[i];
+    if (s0 >= score[i-w-1] && s0 >= score[i-w] && s0 >= score[i-w+1] &&
+        s0 >= score[i-1]   &&                     s0 >  score[i+1]   &&
+        s0 >  score[i+w-1] && s0 >  score[i+w] && s0 >  score[i+w+1])
+      kept.push({ x: i % w, y: (i / w) | 0, score: s0 });
+  }
+  kept.sort((a, b) => b.score - a.score);
+  return kept.slice(0, ORB_FEATURES);
+}
+
+/* Intensity centroid: the direction from a patch's centre to its centre of mass.
+   Without it the descriptor is only good for a few degrees of camera roll, and
+   two shots of a desk taken seconds apart are not that reliably level. */
+function orient(g, w, h, kp) {
+  const r = (ORB_PATCH >> 1);
+  for (const k of kp) {
+    let m01 = 0, m10 = 0;
+    for (let dy = -r; dy <= r; dy++) {
+      const row = (k.y + dy) * w + k.x;
+      for (let dx = -r; dx <= r; dx++) {
+        if (dx * dx + dy * dy > r * r) continue;
+        const v = g[row + dx];
+        m10 += dx * v; m01 += dy * v;
+      }
+    }
+    k.angle = Math.atan2(m01, m10);
+  }
+}
+
+/* 256 sample pairs in a 31 x 31 patch, drawn once from a seeded generator so the
+   pattern is identical on every load and in every browser -- descriptors from
+   two page loads have to be comparable, which a Math.random() pattern would
+   quietly break only on multi-session use. */
+const BRIEF = (() => {
+  let seed = 0x2545F491;
+  const rnd = () => {                           // xorshift32, then Box-Muller
+    seed ^= seed << 13; seed >>>= 0;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;  seed >>>= 0;
+    return seed / 4294967296;
+  };
+  const g = () => {
+    const u = Math.max(1e-9, rnd()), v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const lim = (ORB_PATCH >> 1) - 1, sd = ORB_PATCH / 5;
+  const pts = new Int8Array(256 * 4);
+  for (let i = 0; i < 256 * 4; i++)
+    pts[i] = Math.max(-lim, Math.min(lim, Math.round(g() * sd)));
+  return pts;
+})();
+
+/* Steered BRIEF, on a blurred copy: the raw pixel comparisons are far too noisy
+   otherwise, and ORB's own definition smooths first for the same reason. */
+function describe(g, w, h, kp) {
+  const sm = boxBlur(Float32Array.from(g), w, h, 2, 1);
+  const out = new Uint32Array(kp.length * 8);
+  for (let n = 0; n < kp.length; n++) {
+    const k = kp[n], c = Math.cos(k.angle), s = Math.sin(k.angle);
+    const base = n * 8;
+    for (let b = 0; b < 256; b++) {
+      const ax = BRIEF[b*4], ay = BRIEF[b*4+1], bx = BRIEF[b*4+2], by = BRIEF[b*4+3];
+      const ax2 = k.x + Math.round(c * ax - s * ay), ay2 = k.y + Math.round(s * ax + c * ay);
+      const bx2 = k.x + Math.round(c * bx - s * by), by2 = k.y + Math.round(s * bx + c * by);
+      if (sm[ay2 * w + ax2] < sm[by2 * w + bx2])
+        out[base + (b >> 5)] |= (1 << (b & 31));
+    }
+  }
+  return out;
+}
+
+function popcount(v) {
+  v = v - ((v >> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >> 2) & 0x33333333);
+  return (((v + (v >> 4)) & 0x0F0F0F0F) * 0x01010101) >> 24;
+}
+
+/* Brute force, with Lowe's ratio test. Every descriptor in `db` against every
+   one in `da`: 4000 x 4000 x 8 words is a few hundred million operations, which
+   is seconds on a phone and the single largest cost in a merge. A ratio test
+   rather than a distance cap because what makes a match trustworthy is that the
+   second-best is clearly worse, not that the best is close in absolute terms. */
+function match(da, db, ka, kb) {
+  const out = [];
+  const n = da.length >> 3;
+  for (let j = 0; j < (db.length >> 3); j++) {
+    const jb = j * 8;
+    const b0=db[jb],b1=db[jb+1],b2=db[jb+2],b3=db[jb+3],
+          b4=db[jb+4],b5=db[jb+5],b6=db[jb+6],b7=db[jb+7];
+    let best = 257, second = 257, bi = -1;
+    for (let i = 0; i < n; i++) {
+      const ia = i * 8;
+      const d = popcount(da[ia]^b0) + popcount(da[ia+1]^b1) + popcount(da[ia+2]^b2) +
+                popcount(da[ia+3]^b3) + popcount(da[ia+4]^b4) + popcount(da[ia+5]^b5) +
+                popcount(da[ia+6]^b6) + popcount(da[ia+7]^b7);
+      if (d < best) { second = best; best = d; bi = i; }
+      else if (d < second) second = d;
+    }
+    if (bi >= 0 && best < MATCH_RATIO * second)
+      out.push([kb[j].x, kb[j].y, ka[bi].x, ka[bi].y]);
+  }
+  return out;
+}
+
+/* ============================================================== homography */
+
+function solve(A, b, n) {
+  // Gaussian elimination with partial pivoting. Returns null on a singular
+  // system, which is what a degenerate sample of four points produces.
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+    if (Math.abs(A[piv][c]) < 1e-12) return null;
+    [A[c], A[piv]] = [A[piv], A[c]]; [b[c], b[piv]] = [b[piv], b[c]];
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = A[r][c] / A[c][c];
+      if (!f) continue;
+      for (let k = c; k < n; k++) A[r][k] -= f * A[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  const x = new Float64Array(n);
+  for (let i = 0; i < n; i++) x[i] = b[i] / A[i][i];
+  return x;
+}
+
+/* The homography taking (x,y) to (u,v) for a set of correspondences. Four give
+   an exact answer; more are solved in the least-squares sense through the normal
+   equations, on Hartley-normalised coordinates -- at photo scale the raw system
+   is conditioned badly enough that the refit can come out worse than the four
+   points it started from. */
+function homographyFrom(pts) {
+  const n = pts.length;
+  if (n < 4) return null;
+  let mx=0,my=0,mu=0,mv=0;
+  for (const p of pts) { mx+=p[0]; my+=p[1]; mu+=p[2]; mv+=p[3]; }
+  mx/=n; my/=n; mu/=n; mv/=n;
+  let ds=0, dt=0;
+  for (const p of pts) {
+    ds += Math.hypot(p[0]-mx, p[1]-my);
+    dt += Math.hypot(p[2]-mu, p[3]-mv);
+  }
+  const s = ds > 0 ? n * Math.SQRT2 / ds : 1, t = dt > 0 ? n * Math.SQRT2 / dt : 1;
+
+  const A = [], b = [];
+  for (let i = 0; i < 8; i++) { A.push(new Float64Array(8)); b.push(0); }
+  const add = (row, val) => {                     // accumulate into A^T A, A^T b
+    for (let i = 0; i < 8; i++) {
+      for (let j = 0; j < 8; j++) A[i][j] += row[i] * row[j];
+      b[i] += row[i] * val;
+    }
+  };
+  for (const p of pts) {
+    const x=(p[0]-mx)*s, y=(p[1]-my)*s, u=(p[2]-mu)*t, v=(p[3]-mv)*t;
+    add([x, y, 1, 0, 0, 0, -u*x, -u*y], u);
+    add([0, 0, 0, x, y, 1, -v*x, -v*y], v);
+  }
+  const hh = solve(A, b, 8);
+  if (!hh) return null;
+  // undo the normalisation: H = T_dst^-1 * Hn * T_src
+  const Hn = [[hh[0],hh[1],hh[2]],[hh[3],hh[4],hh[5]],[hh[6],hh[7],1]];
+  const Ts = [[s,0,-s*mx],[0,s,-s*my],[0,0,1]];
+  const Ti = [[1/t,0,mu],[0,1/t,mv],[0,0,1]];
+  return mul3(Ti, mul3(Hn, Ts));
+}
+
+function mul3(A, B) {
+  const C = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let i=0;i<3;i++) for (let j=0;j<3;j++)
+    C[i][j] = A[i][0]*B[0][j] + A[i][1]*B[1][j] + A[i][2]*B[2][j];
+  return C;
+}
+function applyH(H, x, y) {
+  const d = H[2][0]*x + H[2][1]*y + H[2][2];
+  return [(H[0][0]*x + H[0][1]*y + H[0][2]) / d, (H[1][0]*x + H[1][1]*y + H[1][2]) / d];
+}
+function invert3(M) {
+  const [a,b,c]=M[0],[d,e,f]=M[1],[g,h,i]=M[2];
+  const det = a*(e*i-f*h) - b*(d*i-f*g) + c*(d*h-e*g);
+  if (!det) return null;
+  return [[(e*i-f*h)/det,(c*h-b*i)/det,(b*f-c*e)/det],
+          [(f*g-d*i)/det,(a*i-c*g)/det,(c*d-a*f)/det],
+          [(d*h-e*g)/det,(b*g-a*h)/det,(a*e-b*d)/det]];
+}
+
+function ransac(pts) {
+  if (pts.length < 4) return { H: null, inliers: 0, matches: pts.length, reproj: 0 };
+  let bestH = null, bestIn = [];
+  const thr2 = RANSAC_PX * RANSAC_PX;
+  let seed = 12345;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let it = 0; it < RANSAC_ROUNDS; it++) {
+    const pick = [];
+    while (pick.length < 4) {
+      const c = pts[(rnd() * pts.length) | 0];
+      if (!pick.includes(c)) pick.push(c);
+    }
+    const H = homographyFrom(pick);
+    if (!H) continue;
+    const inl = [];
+    for (const p of pts) {
+      const [u, v] = applyH(H, p[0], p[1]);
+      const dx = u - p[2], dy = v - p[3];
+      if (dx*dx + dy*dy < thr2) inl.push(p);
+    }
+    if (inl.length > bestIn.length) { bestIn = inl; bestH = H; }
+    // enough agreement that more sampling cannot plausibly beat it
+    if (bestIn.length > 0.7 * pts.length && it > 200) break;
+  }
+  if (!bestH || bestIn.length < 4) return { H: null, inliers: 0, matches: pts.length, reproj: 0 };
+  const refit = homographyFrom(bestIn) || bestH;
+  const errs = bestIn.map(p => {
+    const [u, v] = applyH(refit, p[0], p[1]);
+    return Math.hypot(u - p[2], v - p[3]);
+  }).sort((a, b) => a - b);
+  return { H: refit, inliers: bestIn.length, matches: pts.length,
+           reproj: errs[errs.length >> 1] };
+}
+
+/* ======================================================= local refinement */
+
+/* Radix-2 FFT, in place, on separate real and imaginary planes. Only ever run
+   on TILE-sized rows and columns, so the length is a power of two by
+   construction and no padding case is needed. */
+function fft(re, im, n, inverse) {
+  for (let i = 1, j = 0; i < n; i++) {            // bit-reversal permutation
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { let t=re[i]; re[i]=re[j]; re[j]=t; t=im[i]; im[i]=im[j]; im[j]=t; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (inverse ? 2 : -2) * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i+k], ui = im[i+k];
+        const vr = re[i+k+len/2]*cr - im[i+k+len/2]*ci;
+        const vi = re[i+k+len/2]*ci + im[i+k+len/2]*cr;
+        re[i+k] = ur+vr; im[i+k] = ui+vi;
+        re[i+k+len/2] = ur-vr; im[i+k+len/2] = ui-vi;
+        const nr = cr*wr - ci*wi; ci = cr*wi + ci*wr; cr = nr;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+}
+
+function fft2(re, im, n, inverse) {
+  const rr = new Float32Array(n), ri = new Float32Array(n);
+  for (let y = 0; y < n; y++) {
+    const o = y * n;
+    fft(re.subarray(o, o + n), im.subarray(o, o + n), n, inverse);
+  }
+  for (let x = 0; x < n; x++) {
+    for (let y = 0; y < n; y++) { rr[y] = re[y*n+x]; ri[y] = im[y*n+x]; }
+    fft(rr, ri, n, inverse);
+    for (let y = 0; y < n; y++) { re[y*n+x] = rr[y]; im[y*n+x] = ri[y]; }
+  }
+}
+
+const HANN = (() => {                              // 2-D Hann window, built once
+  const w = new Float32Array(TILE * TILE), c = new Float32Array(TILE);
+  for (let i = 0; i < TILE; i++) c[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (TILE - 1));
+  for (let y = 0; y < TILE; y++) for (let x = 0; x < TILE; x++) w[y*TILE+x] = c[y] * c[x];
+  return w;
+})();
+
+/* Phase correlation: where the cross-power spectrum's peak lands is the shift
+   between two tiles, to a fraction of a pixel. Returns d such that tile B holds
+   the same content as tile A displaced by d -- so adding d to a sampling
+   position in A's frame reaches the matching content in B.
+
+   `resp` is the peak against the surface's mean rather than cv2's own measure.
+   A tile of blank desk produces a correlation surface with no peak at all, and
+   what distinguishes that from a real answer is how far the maximum stands out,
+   not how tall it is. */
+function phaseCorr(A, B) {
+  const n = TILE, N = n * n;
+  const ar = new Float32Array(N), ai = new Float32Array(N);
+  const br = new Float32Array(N), bi = new Float32Array(N);
+  let ma = 0, mb = 0;
+  for (let i = 0; i < N; i++) { ma += A[i]; mb += B[i]; }
+  ma /= N; mb /= N;
+  for (let i = 0; i < N; i++) { ar[i] = (A[i]-ma)*HANN[i]; br[i] = (B[i]-mb)*HANN[i]; }
+  fft2(ar, ai, n, false);
+  fft2(br, bi, n, false);
+  for (let i = 0; i < N; i++) {                    // A * conj(B), normalised
+    const rr = ar[i]*br[i] + ai[i]*bi[i];
+    const ii = ai[i]*br[i] - ar[i]*bi[i];
+    const mag = Math.hypot(rr, ii) || 1e-12;
+    ar[i] = rr/mag; ai[i] = ii/mag;
+  }
+  fft2(ar, ai, n, true);
+  let peak = -Infinity, px = 0, py = 0, sum = 0;
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const v = ar[y*n+x];
+    sum += Math.abs(v);
+    if (v > peak) { peak = v; px = x; py = y; }
+  }
+  const at = (x, y) => ar[((y+n)%n)*n + ((x+n)%n)];
+  /* Sub-pixel by a weighted centroid of the 3x3 around the peak, which is what
+     turns a whole-pixel answer into the one the blend actually needs -- a pixel
+     of misalignment softens everything the blend touches.
+
+     Measured against known fractional shifts of a broadband field: this leaves
+     0.08 px of error on average and 0.24 px at worst. A 5x5 window is more than
+     twice as bad (0.20 / 0.51) because it reaches into the correlation peak's
+     side lobes, which are not symmetric about the true shift; 9x9 is worse
+     still. A three-point parabola is comparable (0.09 / 0.30) but divides by a
+     curvature that can approach zero, and its textbook form is easy to write
+     with the sign inverted -- which reads as every half-pixel shift coming out
+     a whole pixel wrong, and did. */
+  let sw = 0, sx = 0, sy = 0;
+  for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+    const v = at(px + i, py + j);
+    if (v <= 0) continue;                          // negative lobes are not the peak
+    sw += v; sx += v * (px + i); sy += v * (py + j);
+  }
+  let dx = sw > 0 ? sx / sw : px;
+  let dy = sw > 0 ? sy / sw : py;
+  if (dx > n/2) dx -= n;                           // wrap to a signed shift
+  if (dy > n/2) dy -= n;
+  return { dx: -dx, dy: -dy, resp: peak / (sum / (n*n) || 1e-12) };
+}
+
+/* The tile grid, phase-correlated. Same shape as the Python's _tile_shifts:
+   tiles with nothing to correlate, peaks too weak to believe, and tiles the
+   other frame does not fully cover are left out entirely rather than answered
+   with a zero. */
+function tileShifts(refL, movL, w, h, valid) {
+  const d = [], ok = [], resp = [];
+  const A = new Float32Array(TILE*TILE), B = new Float32Array(TILE*TILE);
+  for (let i = 0; i < REFINE_GRID; i++) {
+    for (let j = 0; j < REFINE_GRID; j++) {
+      const cx = Math.round((j + 0.5) * w / REFINE_GRID);
+      const cy = Math.round((i + 0.5) * h / REFINE_GRID);
+      const x0 = Math.max(0, Math.min(w - TILE, cx - TILE/2));
+      const y0 = Math.max(0, Math.min(h - TILE, cy - TILE/2));
+      const k = i * REFINE_GRID + j;
+      d[k] = [0, 0]; ok[k] = false;
+      if (w < TILE || h < TILE) continue;
+      let covered = true, sum = 0, sum2 = 0;
+      for (let y = 0; y < TILE && covered; y++) {
+        const so = (y0+y)*w + x0, to = y*TILE;
+        for (let x = 0; x < TILE; x++) {
+          if (valid && !valid[so+x]) { covered = false; break; }
+          const a = refL[so+x] * 255, b = movL[so+x] * 255;
+          A[to+x] = a; B[to+x] = b;
+          sum += a; sum2 += a*a;
+        }
+      }
+      if (!covered) continue;
+      const mean = sum / (TILE*TILE);
+      if (Math.sqrt(Math.max(0, sum2/(TILE*TILE) - mean*mean)) < REFINE_MIN_SD) continue;
+      const r = phaseCorr(A, B);
+      resp[k] = r.resp;
+      if (r.resp < REFINE_RESP || Math.max(Math.abs(r.dx), Math.abs(r.dy)) > SHIFT_MAX) continue;
+      d[k] = [r.dx, r.dy]; ok[k] = true;
+    }
+  }
+  return { d, ok, resp };
+}
+
+/* Tiles that don't belong to the smooth field the others describe -- a print
+   nudged between shots, which is this tool's one silent failure. A cubic
+   surface, refit twice without its outliers so one moved print can't bend the
+   model toward itself and hide. Cubic because the residual a homography leaves
+   is mostly radial distortion, which displaces by k*r^2 times the radius. */
+function movedTiles(d, ok, tol = MOVE_TOL) {
+  const G = REFINE_GRID, off = new Float32Array(G*G), moved = new Array(G*G).fill(false);
+  const rows = [], vx = [], vy = [], idx = [];
+  for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+    const k = i*G + j;
+    if (!ok[k]) continue;
+    const x = j/(G-1) - 0.5, y = i/(G-1) - 0.5;
+    const r = [];
+    for (let p = 0; p <= 3; p++) for (let q = 0; q <= p; q++) r.push(Math.pow(x, p-q) * Math.pow(y, q));
+    rows.push(r); vx.push(d[k][0]); vy.push(d[k][1]); idx.push(k);
+  }
+  const M = 10;                                     // terms in a cubic surface
+  if (rows.length < 2*M) { for (const k of idx) moved[k] = true; return { moved, off }; }
+  let keep = rows.map(() => true), res = null;
+  for (let pass = 0; pass < 3; pass++) {
+    const A = [], bx = [], by = [];
+    for (let i = 0; i < M; i++) { A.push(new Float64Array(M)); bx.push(0); by.push(0); }
+    for (let n = 0; n < rows.length; n++) {
+      if (!keep[n]) continue;
+      const r = rows[n];
+      for (let i = 0; i < M; i++) {
+        for (let j = 0; j < M; j++) A[i][j] += r[i]*r[j];
+        bx[i] += r[i]*vx[n]; by[i] += r[i]*vy[n];
+      }
+    }
+    const A2 = A.map(r => Float64Array.from(r));
+    const cx = solve(A, bx.slice(), M), cy = solve(A2, by.slice(), M);
+    if (!cx || !cy) break;
+    res = rows.map((r, n) => {
+      let ex = -vx[n], ey = -vy[n];
+      for (let i = 0; i < M; i++) { ex += r[i]*cx[i]; ey += r[i]*cy[i]; }
+      return Math.hypot(ex, ey);
+    });
+    const good = res.filter(v => v <= tol).length;
+    if (good < 2*M) { for (const k of idx) moved[k] = true; return { moved, off }; }
+    keep = res.map(v => v <= tol);
+  }
+  if (!res) return { moved, off, stray: new Array(G*G).fill(false) };
+  for (let n = 0; n < idx.length; n++) off[idx[n]] = res[n];
+
+  /* A tile off the surface is not yet a moved print. Two things put one there:
+     a print someone nudged, and a correlation that locked onto the wrong peak --
+     thirteen near-identical cards in a grid give a tile several plausible
+     answers, and on the reference pair six tiles came back 8 to 49 px out on a
+     desk where nothing had moved. Response does not tell them apart: those six
+     scored 8.2 to 22.6 against 9.9 to 95.5 for the tiles that fit, which
+     overlaps far too much to threshold.
+
+     What tells them apart is company. A print is 582 x 923 px against a 256 px
+     tile, so a moved one takes several adjacent tiles with it and they all
+     report the same displacement; a wrong peak is alone and agrees with nobody.
+     So an outlier is *movement* only if a neighbour is also out and shifts the
+     same way, and otherwise it is merely unreliable -- dropped from the field it
+     would have distorted, and not announced as something it isn't. */
+  const out = [], stray = new Array(G*G).fill(false);
+  for (let n = 0; n < idx.length; n++) if (res[n] > tol) out.push(idx[n]);
+  for (const k of out) {
+    const i = (k / G) | 0, j = k % G;
+    let company = false;
+    for (let di = -1; di <= 1 && !company; di++) for (let dj = -1; dj <= 1; dj++) {
+      if (!di && !dj) continue;
+      const y = i + di, x = j + dj, k2 = y*G + x;
+      if (y < 0 || x < 0 || y >= G || x >= G || !out.includes(k2)) continue;
+      if (Math.hypot(d[k][0] - d[k2][0], d[k][1] - d[k2][1]) < tol) { company = true; break; }
+    }
+    if (company) moved[k] = true; else stray[k] = true;
+  }
+  return { moved, off, stray };
+}
+
+/* The measured tiles grown into the unmeasured ones and smoothed. What is being
+   modelled varies slowly across the frame -- it is a property of the lens -- so
+   per-tile scatter is noise and smoothing it away is not a compromise. */
+function smoothField(d, ok) {
+  const G = REFINE_GRID;
+  const fx = new Float32Array(G*G), fy = new Float32Array(G*G);
+  const have = ok.slice();
+  for (let k = 0; k < G*G; k++) if (ok[k]) { fx[k] = d[k][0]; fy[k] = d[k][1]; }
+  for (let pass = 0; pass < 6; pass++) {
+    const nx = Float32Array.from(fx), ny = Float32Array.from(fy), nh = have.slice();
+    for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+      const k = i*G+j;
+      if (have[k]) continue;
+      let sx = 0, sy = 0, n = 0;
+      for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+        const y = i+di, x = j+dj;
+        if (y < 0 || x < 0 || y >= G || x >= G || !have[y*G+x]) continue;
+        sx += fx[y*G+x]; sy += fy[y*G+x]; n++;
+      }
+      if (n) { nx[k] = sx/n; ny[k] = sy/n; nh[k] = true; }
+    }
+    fx.set(nx); fy.set(ny); have.length = 0; have.push(...nh);
+  }
+  // a light 3x3 average, the counterpart of the Python's Gaussian on the grid
+  const sx = Float32Array.from(fx), sy = Float32Array.from(fy);
+  for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) {
+    let ax = 0, ay = 0, n = 0;
+    for (let di = -1; di <= 1; di++) for (let dj = -1; dj <= 1; dj++) {
+      const y = Math.min(G-1, Math.max(0, i+di)), x = Math.min(G-1, Math.max(0, j+dj));
+      ax += fx[y*G+x]; ay += fy[y*G+x]; n++;
+    }
+    sx[i*G+j] = ax/n; sy[i*G+j] = ay/n;
+  }
+  return { fx: sx, fy: sy };
+}
+
+/* ==================================================================== warp */
+
+/* One bicubic sample per output pixel, through the refinement offset and the
+   homography together. Two passes -- warp then remap, as the desktop tool does
+   -- would resample twice; composing them costs nothing here because the warp
+   is hand-written anyway.
+
+   Bicubic and not bilinear, which is not a matter of taste: measured on the
+   reference pair, bilinear throws away 10.8% of the sharpness this whole page
+   exists to preserve, while bicubic sits within 3% of Lanczos. */
+function warpInto(src, sw, sh, H, field, dw, dh) {
+  const Hi = invert3(H);
+  const out = new Uint8ClampedArray(dw * dh * 4);
+  const valid = new Uint8Array(dw * dh);
+  const G = REFINE_GRID;
+  const c = new Float32Array(4);
+  for (let y = 0; y < dh; y++) {
+    const gy = Math.min(G - 1.001, Math.max(0, y * G / dh - 0.5));
+    const iy = gy | 0, ty = gy - iy;
+    for (let x = 0; x < dw; x++) {
+      const gx = Math.min(G - 1.001, Math.max(0, x * G / dw - 0.5));
+      const ix = gx | 0, tx = gx - ix;
+      let fx = 0, fy = 0;
+      if (field) {                                  // bilinear read of the tile field
+        const k00 = iy*G+ix, k01 = iy*G+ix+1, k10 = (iy+1)*G+ix, k11 = (iy+1)*G+ix+1;
+        fx = (field.fx[k00]*(1-tx) + field.fx[k01]*tx)*(1-ty) +
+             (field.fx[k10]*(1-tx) + field.fx[k11]*tx)*ty;
+        fy = (field.fy[k00]*(1-tx) + field.fy[k01]*tx)*(1-ty) +
+             (field.fy[k10]*(1-tx) + field.fy[k11]*tx)*ty;
+      }
+      const px = x + fx, py = y + fy;
+      const d = Hi[2][0]*px + Hi[2][1]*py + Hi[2][2];
+      const sx = (Hi[0][0]*px + Hi[0][1]*py + Hi[0][2]) / d;
+      const sy = (Hi[1][0]*px + Hi[1][1]*py + Hi[1][2]) / d;
+      const o = (y*dw + x) * 4;
+      if (sx < 1 || sy < 1 || sx > sw - 3 || sy > sh - 3) { out[o+3] = 255; continue; }
+      const x0 = Math.floor(sx), y0 = Math.floor(sy);
+      const ax = sx - x0, ay = sy - y0;
+      cubicW(ax, c);
+      const wx0=c[0], wx1=c[1], wx2=c[2], wx3=c[3];
+      cubicW(ay, c);
+      for (let ch = 0; ch < 3; ch++) {
+        let v = 0;
+        for (let r = 0; r < 4; r++) {
+          const row = ((y0 - 1 + r) * sw + x0 - 1) * 4 + ch;
+          v += c[r] * (src[row]*wx0 + src[row+4]*wx1 + src[row+8]*wx2 + src[row+12]*wx3);
+        }
+        out[o+ch] = v;
+      }
+      out[o+3] = 255;
+      valid[y*dw + x] = 1;
+    }
+  }
+  return { rgba: out, valid };
+}
+// Catmull-Rom weights: the interpolating member of the cubic family, so a pixel
+// landing exactly on a sample returns that sample untouched.
+function cubicW(t, c) {
+  const t2 = t*t, t3 = t2*t;
+  c[0] = 0.5*(-t3 + 2*t2 - t);
+  c[1] = 0.5*(3*t3 - 5*t2 + 2);
+  c[2] = 0.5*(-3*t3 + 4*t2 + t);
+  c[3] = 0.5*(t3 - t2);
+}
+
+/* ========================================================= exposure match */
+
+/* One gain per channel, in linear light, pulling this frame onto the reference.
+
+   Fitted on a heavily reduced copy, which is not only for speed: least squares
+   over the raw pixels is biased by exactly what this tool exists for. Where the
+   reference is sharp and this frame soft the ratio reads high, where it is the
+   other way round it reads low, and the two do not cancel, because the sharp
+   frame carries all the high-frequency energy the sum is weighted by. On the
+   desktop tool a fixture with a known 1.06 stop between the frames came out as
+   0.904 instead of 0.943 that way. An area-average downscale is a low-pass, so
+   reducing first is the fix and the saving at once.
+
+   A pixel crushed or clipped in *either* frame is left out: one the brighter
+   frame blew out but the reference did not reads as "this frame is darker here"
+   when it is only flat. */
+function gainMatch(ref, mov, valid, w, h) {
+  const gw = Math.max(8, Math.round(w * 900 / Math.max(w, h)));
+  const gh = Math.max(8, Math.round(h * 900 / Math.max(w, h)));
+  const acc = [0,1,2].map(() => ({ a: new Float32Array(gw*gh), b: new Float32Array(gw*gh) }));
+  const n = new Float32Array(gw*gh);
+  for (let y = 0; y < h; y++) {
+    const gy = Math.min(gh-1, (y * gh / h) | 0);
+    for (let x = 0; x < w; x++) {
+      const i = y*w + x, p = i*4;
+      if (!valid[i]) continue;
+      const la = (ref[p]*29 + ref[p+1]*150 + ref[p+2]*77) >> 8;
+      const lb = (mov[p]*29 + mov[p+1]*150 + mov[p+2]*77) >> 8;
+      if (la <= 8 || la >= 248 || lb <= 8 || lb >= 248) continue;
+      const g = gy*gw + Math.min(gw-1, (x * gw / w) | 0);
+      for (let c = 0; c < 3; c++) { acc[c].a[g] += LIN[ref[p+c]]; acc[c].b[g] += LIN[mov[p+c]]; }
+      n[g]++;
+    }
+  }
+  const gains = [1, 1, 1];
+  const r = Math.max(1, Math.round(GAIN_BLUR * gw / w));
+  for (let c = 0; c < 3; c++) {
+    const A = new Float32Array(gw*gh), B = new Float32Array(gw*gh);
+    for (let i = 0; i < gw*gh; i++) if (n[i]) { A[i] = acc[c].a[i]/n[i]; B[i] = acc[c].b[i]/n[i]; }
+    const As = boxBlur(A, gw, gh, r, 2), Bs = boxBlur(B, gw, gh, r, 2);
+    let num = 0, den = 0;
+    for (let i = 0; i < gw*gh; i++) if (n[i]) { num += As[i]*Bs[i]; den += Bs[i]*Bs[i]; }
+    gains[c] = den > 0 ? num/den : 1;
+  }
+  return gains;
+}
+
+/* ===================================================== sharpness and blend */
+
+/* Fine detail per unit area, measured at full resolution and reduced straight
+   into the decision grid.
+
+   Full resolution is not negotiable and is the reason this page exists apart
+   from checleaner.html: on a 1100 px copy, 7 of the reference pair's 13 prints
+   have a sharpness ratio under 1.3 between the sharp and the soft shot. The
+   *grid* is another matter -- the decision is smooth by construction, and on the
+   desktop tool computing the weights at 275 px moved the worst print by 0.2
+   points. So the expensive half runs on every pixel and the cheap half does not.
+
+   On the log of luminance, so it measures contrast relative to local tone: two
+   shots of one desk differ slightly in exposure, and without the log the
+   brighter frame wins everywhere on brightness alone, which is not what "in
+   focus" means. */
+function sharpnessGrid(L, valid, w, h, gw, gh) {
+  const sum = new Float32Array(gw*gh), n = new Float32Array(gw*gh);
+  let lg = new Float32Array(w*h);
+  for (let i = 0; i < w*h; i++) lg[i] = Math.log(Math.max(L[i], 1e-4));
+  /* A small blur before the Laplacian, and it is not a nicety. Undefocused, the
+     pixel-scale term is *noise*, which every frame has in equal measure -- so an
+     unblurred Laplacian adds a constant to both and squeezes the ratio between
+     them toward 1, which is the ratio the blend decides on. Worse, it is not
+     even constant: a frame that has been resampled into the reference's grid has
+     had its noise smoothed away, so the reference wins on grain alone. Measured
+     on the reference pair, leaving this out put the split at 72/28 where it
+     should be 60/40, and cost the worst print 22%. */
+  lg = gauss3(gauss3(lg, w, h), w, h);              // two 1-2-1 passes, sigma ~ 1.0
+  for (let y = 1; y < h-1; y++) {
+    const gy = Math.min(gh-1, (y * gh / h) | 0) * gw;
+    for (let x = 1; x < w-1; x++) {
+      const i = y*w + x;
+      if (valid && !valid[i]) continue;
+      const lap = 4*lg[i] - lg[i-1] - lg[i+1] - lg[i-w] - lg[i+w];
+      const g = gy + Math.min(gw-1, (x * gw / w) | 0);
+      sum[g] += lap*lap; n[g]++;
+    }
+  }
+  const out = new Float32Array(gw*gh);
+  for (let i = 0; i < gw*gh; i++) out[i] = n[i] ? sum[i]/n[i] : 0;
+  // the window the desktop tool applies at full resolution, in grid units
+  return boxBlur(out, gw, gh, Math.max(1, Math.round(SHARP_WIN * gw / (2*w))), 2);
+}
+
+/* Separable 1-2-1, the smallest honest Gaussian (sigma 1/sqrt(2) a pass). */
+function gauss3(src, w, h) {
+  const t = new Float32Array(w*h), o = new Float32Array(w*h);
+  for (let y = 0; y < h; y++) {
+    const r = y*w;
+    for (let x = 0; x < w; x++) {
+      const a = src[r + Math.max(0, x-1)], b = src[r+x], c = src[r + Math.min(w-1, x+1)];
+      t[r+x] = 0.25*a + 0.5*b + 0.25*c;
+    }
+  }
+  for (let y = 0; y < h; y++) {
+    const up = Math.max(0, y-1)*w, dn = Math.min(h-1, y+1)*w, r = y*w;
+    for (let x = 0; x < w; x++) o[r+x] = 0.25*t[up+x] + 0.5*t[r+x] + 0.25*t[dn+x];
+  }
+  return o;
+}
+
+/* A softmax over sharpness, computed on a *blurred* copy of it, so the changeover
+   between frames spreads over hundreds of full-resolution pixels and no seam can
+   land on a card edge. Measured on the desktop pair, a hard per-pixel pick comes
+   out marginally sharper and visibly patchier: which frame a pixel comes from
+   should be a property of the region, not of grain. */
+function blendWeights(grids, covers, gw, gh, fullW) {
+  const N = grids.length, W = [];
+  const r = Math.max(1, Math.round(BLEND_SIGMA * gw / fullW));
+  const L = grids.map((g, k) => {
+    const l = new Float32Array(gw*gh);
+    for (let i = 0; i < gw*gh; i++) l[i] = Math.log((covers[k][i] ? g[i] : 0) + 1e-6);
+    return boxBlur(l, gw, gh, r, 3);
+  });
+  for (let k = 0; k < N; k++) W.push(new Float32Array(gw*gh));
+  for (let i = 0; i < gw*gh; i++) {
+    let best = -Infinity;
+    for (let k = 0; k < N; k++) if (covers[k][i] && L[k][i] > best) best = L[k][i];
+    let tot = 0;
+    for (let k = 0; k < N; k++) {
+      const v = covers[k][i] ? Math.exp((L[k][i] - best) * BLEND_SHARPNESS) : 0;
+      W[k][i] = v; tot += v;
+    }
+    if (tot > 1e-9) { for (let k = 0; k < N; k++) W[k][i] /= tot; }
+    else W[0][i] = 1;      // nothing covered here but the reference: fall back to it
+  }
+  return W;
+}
+
+/* ================================================================== merge */
+
+function blend(frames, W, gw, gh, w, h) {
+  const out = new Uint8ClampedArray(w*h*4);
+  const N = frames.length;
+  for (let y = 0; y < h; y++) {
+    const gy = Math.min(gh - 1.001, Math.max(0, y * gh / h - 0.5));
+    const iy = gy | 0, ty = gy - iy, iy1 = Math.min(gh-1, iy+1);
+    for (let x = 0; x < w; x++) {
+      const gx = Math.min(gw - 1.001, Math.max(0, x * gw / w - 0.5));
+      const ix = gx | 0, tx = gx - ix, ix1 = Math.min(gw-1, ix+1);
+      const p = (y*w + x) * 4;
+      let r = 0, g = 0, b = 0, tot = 0;
+      for (let k = 0; k < N; k++) {
+        const Wk = W[k];
+        const wt = (Wk[iy*gw+ix]*(1-tx) + Wk[iy*gw+ix1]*tx)*(1-ty) +
+                   (Wk[iy1*gw+ix]*(1-tx) + Wk[iy1*gw+ix1]*tx)*ty;
+        if (wt <= 0.0005) continue;
+        const src = frames[k].rgba, gain = frames[k].gains;
+        r += wt * LIN[src[p]]   * gain[0];
+        g += wt * LIN[src[p+1]] * gain[1];
+        b += wt * LIN[src[p+2]] * gain[2];
+        tot += wt;
+      }
+      if (tot > 0) { r /= tot; g /= tot; b /= tot; }
+      out[p] = toSrgb8(r); out[p+1] = toSrgb8(g); out[p+2] = toSrgb8(b); out[p+3] = 255;
+    }
+  }
+  return new ImageData(out, w, h);
+}
+
+/* =================================================================== EXIF */
+
+/* Lifted from checleaner.html. Duplicated rather than shared: both pages are
+   single files opened directly, with no build step to factor anything into, and
+   a <script src> would trade that for a second request the file:// path cannot
+   make. If one copy changes, change both -- the tests pin the capture date on
+   each page separately for exactly this reason. */
+
+function findExifSegment(buf) {
+  const b = new Uint8Array(buf);
+  if (b[0] !== 0xFF || b[1] !== 0xD8) return null;        // not a JPEG
+  let p = 2;
+  while (p + 4 <= b.length) {
+    if (b[p] !== 0xFF) break;
+    const marker = b[p + 1];
+    if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { p += 2; continue; }
+    if (marker === 0xDA || marker === 0xD9) break;
+    const len = (b[p + 2] << 8) | b[p + 3];
+    if (marker === 0xE1 && b[p + 4] === 0x45 && b[p + 5] === 0x78 && b[p + 6] === 0x69 &&
+        b[p + 7] === 0x66 && b[p + 8] === 0x00 && b[p + 9] === 0x00) {
+      return b.slice(p, p + 2 + len);
+    }
+    p += 2 + len;
+  }
+  return null;
+}
+
+function patchExifSegment(seg, outW, outH) {
+  const tiffStart = 10;
+  const dv = new DataView(seg.buffer, seg.byteOffset, seg.byteLength);
+  const little = dv.getUint16(tiffStart) === 0x4949;
+  const rd16 = o => dv.getUint16(o, little), rd32 = o => dv.getUint32(o, little);
+  const wr16 = (o, v) => dv.setUint16(o, v, little), wr32 = (o, v) => dv.setUint32(o, v, little);
+  function readIFD(off) {
+    const n = rd16(tiffStart + off), entries = [];
+    for (let i = 0; i < n; i++) {
+      const e = tiffStart + off + 2 + i * 12;
+      entries.push({ tag: rd16(e), type: rd16(e + 2), count: rd32(e + 4), valueOff: e + 8 });
+    }
+    return { entries, nextOff: tiffStart + off + 2 + n * 12 };
+  }
+  try {
+    const ifd0 = readIFD(rd32(tiffStart + 4));
+    let exifIFDOff = null;
+    for (const e of ifd0.entries) {
+      if (e.tag === 0x0112 && e.type === 3) wr16(e.valueOff, 1);   // orientation -> normal
+      if (e.tag === 0x8769) exifIFDOff = rd32(e.valueOff);
+    }
+    wr32(ifd0.nextOff, 0);                                 // drop the thumbnail IFD chain
+    if (exifIFDOff != null) {
+      for (const e of readIFD(exifIFDOff).entries) {
+        if (e.tag === 0xA002 && e.count === 1) (e.type === 4 ? wr32 : wr16)(e.valueOff, outW);
+        if (e.tag === 0xA003 && e.count === 1) (e.type === 4 ? wr32 : wr16)(e.valueOff, outH);
+      }
+    }
+  } catch { /* malformed EXIF: ship the file without these tweaks rather than fail */ }
+}
+
+async function readExif(file) {
+  if (!file) return { seg: null, note: "", retry: false };
+  try {
+    const seg = findExifSegment(await file.arrayBuffer());
+    return seg ? { seg, note: "", retry: false }
+               : { seg: null, note: "the first shot carried no EXIF to copy", retry: false };
+  } catch (err) {
+    return { seg: null, note: `couldn't read the first shot's EXIF (${err.name})`, retry: true };
+  }
+}
+
+async function withExif(blob, seg, outW, outH) {
+  if (!seg) return blob;
+  try {
+    seg = seg.slice();
+    patchExifSegment(seg, outW, outH);
+    const out = new Uint8Array(await blob.arrayBuffer());
+    const spliced = new Uint8Array(out.length + seg.length);
+    spliced.set(out.subarray(0, 2), 0);
+    spliced.set(seg, 2);
+    spliced.set(out.subarray(2), 2 + seg.length);
+    return new Blob([spliced], { type: "image/jpeg" });
+  } catch {
+    return blob;
+  }
+}
+
+/* ========================================================== orchestration */
+
+const $ = id => document.getElementById(id);
+const statusEl = $("status");
+const setStatus = t => { statusEl.textContent = t; };
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+
+let resultCanvas = null, resultName = "merged.jpg";
+/* The first shot's EXIF, lifted when the files arrive rather than when Save is
+   tapped. On Android a picked file is a content:// handle the page can lose the
+   right to read minutes later, and a catch around a lazy read turns that into a
+   saved photo with no capture date and no complaint. checleaner.html learned
+   this the hard way; see the 2026-08-30 entry in docs/HISTORY.md. */
+let sourceExif = null, sourceExifNote = "", sourceExifRetry = false, sourceFile = null;
+let lastMerge = null, lastFrames = null, lastImgs = null;   // read by tools/webfocus.py
+const DEBUG = /[?&]debug\b/.test(location.search);
+
+function drawTo(canvas, img, maxW = 720) {
+  const scale = Math.min(1, maxW / img.width);
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const tmp = document.createElement("canvas");
+  tmp.width = img.width; tmp.height = img.height;
+  tmp.getContext("2d").putImageData(img, 0, 0);
+  canvas.getContext("2d").drawImage(tmp, 0, 0, canvas.width, canvas.height);
+}
+
+async function decode(file, scale) {
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close?.();
+  return ctx.getImageData(0, 0, w, h);
+}
+
+/* Line one frame up with the reference and pull its exposure onto it. Returns
+   null with a reason when the two are not the same layout -- a merge of
+   unrelated photographs is a plausible-looking file that is nonsense, which is
+   worse than an error. */
+function alignFrame(refRgba, refL, refGray, w, h, img, name) {
+  const rep = { name, matches: 0, inliers: 0, reproj: 0, gains: [1,1,1], moved: 0, worst: 0 };
+  const gray = grayBytes(img.data, img.width, img.height);
+  const kb = fastCorners(gray, img.width, img.height);
+  orient(gray, img.width, img.height, kb);
+  const db = describe(gray, img.width, img.height, kb);
+  const ka = refGray.kp, da = refGray.desc;
+  const pairs = match(da, db, ka, kb);
+  const fit = ransac(pairs);
+  rep.matches = fit.matches; rep.inliers = fit.inliers; rep.reproj = fit.reproj;
+  if (!fit.H || fit.inliers < MIN_INLIERS) {
+    rep.failed = `${fit.inliers} inliers from ${fit.matches} matches ` +
+                 `(needs ${MIN_INLIERS}) — is this the same layout?`;
+    return { rep };
+  }
+  let warped = warpInto(img.data, img.width, img.height, fit.H, null, w, h);
+  const movL = luma(warped.rgba, w, h);
+  const { d, ok, resp } = tileShifts(refL, movL, w, h, warped.valid);
+  const mv = movedTiles(d, ok);
+  rep.moved = mv.moved.filter(Boolean).length;
+  rep.worst = Math.max(0, ...mv.off);
+  // kept for tools/webfocus.py: the numbers the refinement and the movement
+  // check are decided on, which cannot be read off a finished page any other way
+  rep.tiles = d.map((v, i) => ({ dx: v[0], dy: v[1], ok: ok[i], off: mv.off[i], resp: resp[i] || 0 }));
+  const keep = ok.map((v, i) => v && !mv.moved[i] && !mv.stray[i]);
+  rep.stray = mv.stray.filter(Boolean).length;
+  // A moved print is left where it is rather than corrected: the field is a
+  // rubber sheet, and bending it to follow one print drags that print's
+  // neighbours off alignment chasing something that is no longer there.
+  const field = smoothField(d, keep);
+  warped = warpInto(img.data, img.width, img.height, fit.H, field, w, h);
+  rep.gains = gainMatch(refRgba, warped.rgba, warped.valid, w, h);
+  return { rep, frame: { rgba: warped.rgba, valid: warped.valid, gains: rep.gains } };
+}
+
+async function process(files) {
+  sourceFile = files[0];
+  resultName = (files[0].name || "merged").replace(/\.[^.]+$/, "") + "_merged.jpg";
+  setStatus("reading photos…");
+  await nextFrame();
+  ({ seg: sourceExif, note: sourceExifNote, retry: sourceExifRetry } = await readExif(files[0]));
+
+  // Decide one scale for every frame up front: they have to land on a common
+  // grid, and a budget spent per-file would let a big first shot starve the rest.
+  const probe = await createImageBitmap(files[0]);
+  const mpx = probe.width * probe.height / 1e6;
+  probe.close?.();
+  const scale = Math.min(1, Math.sqrt(MAX_TOTAL_MPX / (mpx * files.length)));
+  const imgs = [];
+  for (let i = 0; i < files.length; i++) {
+    setStatus(`reading photo ${i+1} of ${files.length}…`);
+    await nextFrame();
+    imgs.push(await decode(files[i], scale));
+  }
+  const w = imgs[0].width, h = imgs[0].height;
+  if (DEBUG) lastImgs = imgs;      // before any early return, so a failure can be probed
+  drawTo($("before"), imgs[0]);
+  const scaleNote = scale < 1
+    ? `scaled to ${Math.round(scale*100)}% so ${files.length} frames fit in memory` : "";
+
+  setStatus("finding features in the first shot…");
+  await nextFrame();
+  const refGrayBytes = grayBytes(imgs[0].data, w, h);
+  const kp = fastCorners(refGrayBytes, w, h);
+  orient(refGrayBytes, w, h, kp);
+  // computed once and reused for every other frame, which is the whole saving
+  // of merging N at a time rather than pairwise
+  const refGray = { kp, desc: describe(refGrayBytes, w, h, kp) };
+  const refL = luma(imgs[0].data, w, h);
+
+  const reports = [{ name: files[0].name, reference: true, share: 0 }];
+  const frames = [{ rgba: imgs[0].data, valid: null, gains: [1,1,1] }];
+  for (let i = 1; i < imgs.length; i++) {
+    setStatus(`lining up photo ${i+1} of ${files.length}…`);
+    await nextFrame();
+    // Frames need not be the same size: the warp samples each one in its own
+    // coordinates and writes into the reference's grid, so a shot framed a
+    // little wider is simply a shot framed a little wider. Requiring a match
+    // here refused the reference pair outright, which differ by 141 px.
+    const { rep, frame } = alignFrame(imgs[0].data, refL, refGray, w, h, imgs[i], files[i].name);
+    reports.push(rep);
+    if (frame) { frames.push(frame); rep.alignedIndex = frames.length - 1; }
+  }
+  if (frames.length < 2) {
+    setStatus("nothing lined up with the first shot; there is nothing to merge.");
+    return { reports, out: null, scaleNote };
+  }
+
+  setStatus("measuring focus…");
+  await nextFrame();
+  const gw = Math.max(16, Math.round(w * WEIGHT_GRID / Math.max(w, h)));
+  const gh = Math.max(16, Math.round(h * WEIGHT_GRID / Math.max(w, h)));
+  const grids = [], covers = [];
+  for (const f of frames) {
+    const L = f.valid ? luma(f.rgba, w, h) : refL;
+    grids.push(sharpnessGrid(L, f.valid, w, h, gw, gh));
+    const cov = new Uint8Array(gw*gh).fill(f.valid ? 0 : 1);
+    if (f.valid) {
+      const n = new Float32Array(gw*gh), t = new Float32Array(gw*gh);
+      for (let y = 0; y < h; y++) {
+        const gy = Math.min(gh-1, (y*gh/h)|0)*gw;
+        for (let x = 0; x < w; x++) {
+          const g = gy + Math.min(gw-1, (x*gw/w)|0);
+          n[g]++; if (f.valid[y*w+x]) t[g]++;
+        }
+      }
+      for (let i = 0; i < gw*gh; i++) cov[i] = t[i] > 0.98*n[i] ? 1 : 0;
+    }
+    covers.push(cov);
+    await nextFrame();
+  }
+
+  setStatus("merging…");
+  await nextFrame();
+  const W = blendWeights(grids, covers, gw, gh, Math.max(w, h));
+  const used = reports.filter(r => !r.failed);
+  for (let k = 0; k < W.length; k++) {
+    let s = 0;
+    for (let i = 0; i < gw*gh; i++) s += W[k][i];
+    used[k].share = s / (gw*gh);
+  }
+  const out = blend(frames, W, gw, gh, w, h);
+  // the decision grid itself, kept for tools/webfocus.py: when a merge comes out
+  // soft it is usually the weights hedging, and nothing else on the page says so
+  // The aligned frames are the largest thing here -- 40 MB each at 10 Mpx -- so
+  // they are released with the merge unless a calibration run asked to keep them.
+  // tools/webfocus.py opens the page with ?debug when it wants the pixels.
+  if (DEBUG) lastFrames = frames;
+  return { reports, out, scaleNote, weights: W, gw, gh,
+           sharp: grids.map(g => Array.from(g)) };
+}
+
+function report(res) {
+  $("frames").innerHTML = res.reports.map(r => {
+    if (r.reference) return `<div class="frame"><b>${r.name}</b> — reference` +
+      `${r.share ? `, ${Math.round(r.share*100)}% of the result` : ""}</div>`;
+    if (r.failed) return `<div class="frame bad"><b>${r.name}</b> — skipped: ${r.failed}</div>`;
+    const moved = r.moved ? ` · <b>moved: ${r.moved} regions, up to ${r.worst.toFixed(1)}px</b>` : "";
+    return `<div class="frame ${r.moved ? "bad" : ""}"><b>${r.name}</b> — ` +
+      `${r.inliers}/${r.matches} inliers, ${r.reproj.toFixed(2)}px, ` +
+      `${Math.round(r.share*100)}% of the result${moved}</div>`;
+  }).join("");
+  const rows = [];
+  if (res.out) rows.push(["output", `${res.out.width} × ${res.out.height}`]);
+  rows.push(["frames merged", `${res.reports.filter(r => !r.failed).length} of ${res.reports.length}`]);
+  const g = res.reports.find(r => r.gains && !r.reference);
+  if (g) rows.push(["exposure match", g.gains.map(v => v.toFixed(3)).join(", ")]);
+  if (res.scaleNote) rows.push(["note", res.scaleNote]);
+  if (res.reports.some(r => r.moved))
+    rows.push(["warning", "something moved between shots — those areas will ghost"]);
+  $("stats").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+  $("stage").classList.add("on");
+}
+
+async function runFiles(files) {
+  if (!files || files.length === 0) return;
+  if (files.length < 2) { setStatus("pick at least two shots of the same layout."); return; }
+  $("stage").classList.remove("on");
+  try {
+    const res = await process(files);
+    lastMerge = res;
+    report(res);
+    if (!res.out) return;
+    const c = document.createElement("canvas");
+    c.width = res.out.width; c.height = res.out.height;
+    c.getContext("2d").putImageData(res.out, 0, 0);
+    resultCanvas = c;
+    drawTo($("after"), res.out);
+    const moved = res.reports.some(r => r.moved);
+    setStatus(`done — ${res.out.width} × ${res.out.height}` +
+              (moved ? " — but something moved between shots; check for ghosting" : ""));
+  } catch (err) {
+    setStatus("something went wrong: " + err.message);
+    console.error(err);
+  }
+}
+
+$("pick").addEventListener("change", async e => {
+  const files = Array.from(e.target.files || []);
+  // The picker hands them back in an order the OS chose; sorting by name makes
+  // the reference predictable, which matters because the output takes its
+  // framing and its EXIF from whichever frame is first.
+  files.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+  await runFiles(files);
+  e.target.value = "";
+});
+
+$("save").addEventListener("click", () => {
+  if (!resultCanvas) return;
+  resultCanvas.toBlob(async blob => {
+    if (!sourceExif && sourceExifRetry)
+      ({ seg: sourceExif, note: sourceExifNote, retry: sourceExifRetry } = await readExif(sourceFile));
+    const withDate = await withExif(blob, sourceExif, resultCanvas.width, resultCanvas.height);
+    const url = URL.createObjectURL(withDate);
+    const a = document.createElement("a");
+    a.href = url; a.download = resultName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    setStatus("saved to Downloads as " + resultName
+              + (sourceExifNote ? " — " + sourceExifNote : ""));
+  }, "image/jpeg", 0.96);
+});
+
+/* Hosted only: the service worker, for offline use. A no-op on file://, where
+   the page is opened directly and it is not available. */
+if (location.protocol === "https:" || location.protocol === "http:") {
+  if ("serviceWorker" in navigator)
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+</script>
+</body>
+</html>

@@ -2,7 +2,7 @@
    Two jobs: keep the app usable offline once installed, and receive an image
    shared to it from the Android share sheet (Web Share Target). Bump VERSION
    to force clients onto a new app shell. */
-const VERSION = "checleaner-v2";
+const VERSION = "checleaner-v3";
 // Pinned exactly: the app hard-codes the same version, and an unpinned runtime
 // could change decode behaviour under a cached model without anything here
 // noticing. Only these two files are ever fetched -- verified by watching the
@@ -12,7 +12,12 @@ const ORT = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/";
 const FACE = [ORT + "ort.min.js", ORT + "ort-wasm-simd.wasm"];
 const SHELL = ["./", "./index.html", "./manifest.webmanifest",
                "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png",
-               "./face_detection_yunet_2023mar.onnx"];
+               "./face_detection_yunet_2023mar.onnx",
+               // Focusmerge is a second page under the same scope and service
+               // worker: a different job, but the same origin and the same
+               // offline promise. It shares the icons and needs no runtime --
+               // everything it does is in the file.
+               "./focusmerge.html", "./focusmerge.webmanifest"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(VERSION).then(async (c) => {
