@@ -30,6 +30,8 @@ flag, including for files that passed.
 checleaner/
   checleaner.py          batch CLI (desktop) — the reference implementation
   checleaner.html        single-file phone app, same pipeline ported to JS
+  tools/focusmerge.py    merge several shots of one unmoved layout, keeping the
+                           sharp parts of each — run by hand, before a run
   docs/PIPELINE.md       the algorithm, why each step is the way it is
   docs/HISTORY.md        every batch processed, with before/after measurements
   chekis/                source photos, gitignored — never committed
@@ -45,6 +47,10 @@ checleaner/
 - **instax mini is 54 × 86 mm** → aspect 1.5926, output 1800 × 2867.
 - **Scope is fronts.** Backs were handled once as an exception; see
   `docs/PIPELINE.md`.
+
+When a layout was photographed more than once and different prints are soft in
+each, `tools/focusmerge.py a.jpg b.jpg -o merged.jpg` combines them into one
+frame that is in focus everywhere; feed that to checleaner as an ordinary photo.
 
 See `docs/PIPELINE.md` for the algorithm and `docs/HISTORY.md` for every
 batch processed so far, with the measurements each one came out at.

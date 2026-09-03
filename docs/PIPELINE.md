@@ -897,6 +897,149 @@ comes up again:
 
 ---
 
+## Merging several shots of one layout (`tools/focusmerge.py`, *not* the pipeline)
+
+A phone picks one focus distance for the whole frame. The desk is not perpendicular
+to the lens, so a deskful of prints comes out crisp in a band and soft outside it,
+and which prints land in the band changes shot to shot. On `002232944` /
+`002255786` — the same thirteen prints, three rows, photographed twice seconds
+apart — the first is sharp on row A and B1–B4, the second on B5 and row C. A1 is
+2.5× sharper in the first (0.0402 vs 0.0161), C5 2.5× sharper in the second
+(0.0478 vs 0.0193). Keeping either photo throws away a print.
+
+`tools/focusmerge.py` combines them into one frame that is in focus everywhere,
+and then a normal run treats that frame as an ordinary input. It is deliberately
+**outside** the pipeline: it needs to be told that a set of files is the same
+arrangement, which nothing in the folder records, and it must be run before the
+colour pass rather than inside it.
+
+```bash
+python3 tools/focusmerge.py <shot1>.jpg <shot2>.jpg -o merged.jpg
+python3 tools/focusmerge.py <shot*>.jpg --check        # align and report, write nothing
+```
+
+Four steps. The first file is the reference and keeps its framing, its dimensions
+and its EXIF.
+
+**1. Homography.** SIFT + RANSAC, the others onto the reference. This is the exact
+model, not an approximation — the prints all lie on one plane — which is also why
+the inlier count doubles as the "is this even the same layout?" test: the real pair
+reaches 1996 inliers of 2530 matches at 0.73 px median reprojection, so
+`MIN_INLIERS` = 60 refuses a stranger without coming near a real one.
+
+**2. Local refinement.** The homography still leaves a smooth ~1.4 px residual —
+lens distortion, which no projective transform can absorb, showing up here because
+the two shots were framed at slightly different distances. This matters more than
+its size suggests: the changeover between two focus zones is exactly where both
+frames contribute, and blending frames a pixel apart *softens what it touches*,
+which is the thing being fixed. Phase-correlate a 10×10 grid of tiles, drop the
+ones with no answer (flat desk, weak peak, not fully covered by the other shot),
+fill from the neighbours, smooth, and remap. Skipping it costs B4 12% of its
+sharpness; with it, the worst of the thirteen prints keeps **96.9%** of the best
+single frame and the mean is **100.5%**.
+
+**3. Exposure match**, in linear light, one gain per channel. Fitted on *low-passed*
+copies of both frames (`GAIN_BLUR` = 8 px), which is not a detail: plain least
+squares on the pixels is biased by the very thing this tool exists for. Where the
+reference is sharp and the other frame soft the ratio reads high, where it is the
+other way round it reads low, and the two do not cancel — the sharp frame carries
+all the high-frequency energy the sum is weighted by. On a fixture built with a
+known 1.06 stop between the frames, the pixel fit returned 0.904 where the answer
+was 0.943; past the defocus scale both frames carry the same picture, so blurring
+first leaves only the tone difference the gain is meant to describe. A pixel
+crushed *or clipped in either frame* is dropped as well — one the brighter frame
+blew out but the reference didn't reads as "this frame is darker here" when it is
+only flat. That was worth three points of gain back while the fit ran on the
+pixels; with the low-pass in front of it, it measures as nothing even on a frame
+whose middle third is deliberately blown, and it stays only because it is correct
+and free.
+
+**4. Blend.** Per-pixel sharpness (`SHARP_WIN` = 41 px box on the squared Laplacian
+of **log** luminance — the log makes it contrast-relative, so a small exposure
+difference cannot decide which frame is "sharper"), softmaxed with
+`BLEND_SHARPNESS` = 12, and then the *decision* is blurred with `BLEND_SIGMA` = 25
+before it is applied, so the changeover happens over hundreds of pixels and no seam
+can land on a card edge. Checked at 1:1 on the B4/B5 signature ink, where a seam or
+a doubled stroke would be obvious.
+
+`BLEND_SIGMA` does cost something, and the trade is worth stating rather than
+assuming. A hard per-pixel pick measures *slightly sharper* on the real pair — the
+worst print keeps 97.7% of the best frame against 96.3% — because the tie band goes
+to one frame outright instead of a mixture. What it also produces is a patchwork:
+2.4% of pixels differ by more than 4/255 from the smoothed version, in blobs that
+follow pixel-scale noise in the sharpness measure and nothing about the photograph.
+Sharpness is not the only thing being preserved. Which frame a pixel comes from
+should be a property of the region, and at pixel scale the two frames' grain and
+whatever sub-pixel misalignment survives step 2 get interleaved instead.
+
+### The one silent failure: a print that moved
+
+Everything above is a global alignment. A print nudged between shots lands in two
+places at once and blends into a ghost — and every other number in the report still
+looks fine, because the other twelve prints did line up. So it is checked for.
+
+The check cannot be "where do the frames disagree": they are *supposed* to
+disagree, that being the focus difference. Blurring both past their defocus and
+measuring the leftover as |ΔI| / |∇I| was tried first and reported five moved
+regions on a pair where nothing moved — defocus at this scale is not fully gone at
+any blur that leaves the picture intact.
+
+What works is the tile shifts step 2 already measures. A moved print disagrees in a
+way the optics cannot: it sits off the smooth residual field every other tile
+shares. Fit a **cubic** surface in x and y to the tile shifts, refit twice without
+its outliers so one moved print cannot bend the surface toward itself and hide, and
+flag whatever is left more than `MOVE_TOL` = 3 px off it. Cubic because the dominant
+cause is radial distortion, whose displacement goes as k·r²·r — third order, not
+second; fitting the real pair's 84 measured tiles leaves 1.89 px at first order,
+1.58 at second and **1.22 at third**, so the tolerance clears the honest scatter by
+2.5×. Moved tiles are excluded from the correction field as well as reported: the
+correction is a rubber sheet, and bending it to follow one print would drag that
+print's neighbours off alignment chasing something that is no longer there.
+
+A false alarm costs a look at the photo; a missed one costs a ghost nobody sees.
+That asymmetry is why the tolerance sits where it does.
+
+### Adopting a merge into a batch
+
+A batch is exactly the loose image files in its folder — `run()` does one
+non-recursive `os.listdir` — so `balanced/`, `review/` and a `raw/` subfolder are
+all invisible to it. That is the mechanism for retiring the originals: move them
+into `<batch>/raw/` and the batch holds the merge in their place.
+
+It matters that they *are* retired. Left loose, the same thirteen prints get
+balanced three times, and — the part that reaches other files — that one shoot
+gets three votes in the folder-wide desk median every subsequent run draws its
+target from. On `chekis/main` the swap moved the target from
+`[60.8, 41.1, 29.6]` over 117 files to `[60.8, 41.0, 29.6]` over 116: a tenth of
+a level on green, which is the size of effect to expect and the reason to keep it
+that way.
+
+Two things that do not take care of themselves:
+
+- **Nothing prunes an output whose source has left.** The originals' files stay
+  in `balanced/` and their rows vanish from `report.csv`, so delete them by hand
+  as part of the move.
+- **The merge must not reuse the reference's filename.** `balanced/` is consulted
+  by filename to decide what is already done, so a merge named after its
+  reference is read as already processed and skipped without a word. `.MERGE.jpg`
+  in place of `.MP.jpg` keeps the reference's timestamp — which is also what its
+  EXIF now says — while staying a distinct name.
+
+### Limits
+
+- **The prints must not move.** The camera may move freely; that is what step 1 is
+  for. This is checked, not assumed, but the check is a warning and not a refusal.
+- **Merge before balancing, never after.** The colour targets are library-wide and
+  the merge is anchored to the reference frame's tone, so the merged file measures
+  like any other photo of that desk. Balancing two frames separately and merging
+  afterwards would blend two different corrections.
+- **N frames, not just two.** The code takes any number; only two have ever been
+  shot.
+- **Nothing here is ported to `checleaner.html`.** The app sees one photo at a time,
+  like desk matching (§ 2).
+
+---
+
 ## Verifying a change
 
 Measure, don't eyeball. This reproduces the numbers quoted in `docs/HISTORY.md`:

@@ -20,19 +20,30 @@ checleaner/
   tools/detect.py        fast detection-only preview for named files (no colour pass)
   tools/webdetect.py     the same, for checleaner.html — drives the page under Playwright
   tools/orientcheck.py   scores an orientation estimator against report.csv's own answers
+  tools/focusmerge.py    merges several shots of one unmoved layout into one, keeping
+                           whichever frame is in focus where — run by hand, before a run
   tests/test_pipeline.py regression tests for checleaner.py
   tests/test_web.py      the same, for checleaner.html — drives the page under Playwright
+  tests/test_focusmerge.py  regression tests for tools/focusmerge.py
   web/                   PWA assets (manifest, service worker, icons) for the hosted app
   web/face_detection_yunet_2023mar.onnx  the face model, MIT, identical to checleaner.py's
   .github/workflows/pages.yml  publishes checleaner.html to GitHub Pages over HTTPS
   chekis/                source photos, gitignored — never committed
     main/                 most photos land here
+      raw/                  shots superseded by a focusmerge output — kept, not run
     <other>/               ad hoc structure for a specific shoot, e.g. rancheki,
                             sova_song_chekis — created as needed, not a fixed set
 ```
 
 Source photos are never modified in place. Output goes to `balanced/` (and
 `review/` for the CLI) inside each batch folder, keeping the original filename.
+
+**A batch is exactly the loose image files in the folder.** `run()` does one
+non-recursive `os.listdir`, so `balanced/`, `review/` and `raw/` are invisible to
+it — moving a photo into a subfolder is how you take it out of a run without
+deleting it. Nothing prunes an output whose source has left, though: the old
+`balanced/` copy stays and its `report.csv` row disappears, so delete it by hand
+as part of the move.
 
 ## Running
 
@@ -123,6 +134,38 @@ its glare rescue, and confirm which test fires. Two didn't, and that is how
 caught by nothing but the window count) and the stray-glare row fixture came to
 exist. Do the same for any test added here; a test nobody has watched fail is
 not yet a test.
+
+When several shots of the *same, unmoved* layout exist, `tools/focusmerge.py`
+combines them into one frame that is in focus everywhere, which then goes through
+a normal run as an ordinary input:
+
+```bash
+python3 tools/focusmerge.py <shot1>.jpg <shot2>.jpg -o merged.jpg
+python3 tools/focusmerge.py <shot*>.jpg --check        # align and report, write nothing
+```
+
+It is a side tool on purpose — nothing in a folder records that two files are the
+same arrangement, so it has to be told, and it has to run before the colour pass.
+A phone focuses at one distance for the whole frame, so a deskful of prints is
+crisp in a band and soft outside it, and the band moves between shots: on
+`002232944` / `002255786` each photo has a print the other renders 2.5× softer.
+The merge keeps 96.9% of the best frame on the worst of the thirteen prints.
+`docs/PIPELINE.md` § Merging several shots has the method and the constants.
+
+Its one silent failure is a print that was *moved* between shots — it aligns
+nowhere and ghosts, while every other number in the report still looks fine — so
+that is checked for and reported. Believe the warning: the check was calibrated
+against a 1.22 px worst case on a still desk, so it does not fire idly.
+
+**Adopting a merge** means the batch should hold it *instead of* its inputs, or
+the same prints get balanced three times and one shoot gets three votes in the
+folder-wide desk median. Move the originals to `<batch>/raw/`, delete their old
+`balanced/` copies, and give the merge a name that doesn't collide with the
+reference's — `002232944.MERGE.jpg` for the pair above. The
+collision matters: `balanced/` is checked by filename, so a merge reusing its
+reference's name is read as already processed and skipped in silence. Tests that
+want the originals go through `_merged_source()` in `tests/test_focusmerge.py`,
+which looks in `raw/` first for the same reason.
 
 The phone app is opened directly in a browser; there is no build step. To test
 it headlessly, use `tools/webdetect.py` — the JS counterpart to

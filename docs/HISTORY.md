@@ -1671,6 +1671,168 @@ the anchor click, which is *before* the handler's `setStatus`, so the status
 assertion raced and failed under unrelated mutations. It now waits for the line
 to settle.
 
+## 2026-09-03 — two shots of one layout, merged for focus
+
+`002232944` and `002255786` are the same thirteen prints — three rows, `A123`,
+`B12345`, `C12345` — photographed twice, seconds apart, nothing on the desk
+touched. Different prints are soft in each, so neither file is the good one.
+
+Measured per print (boxfiltered Laplacian² of log luminance over each print's
+picture window), the difference is not scattered but banded, which is what a
+focal plane crossing a desk looks like:
+
+| | 002232944 | 002255786 | winner |
+|---|---|---|---|
+| A1 | **0.0402** | 0.0161 | first, 2.5× |
+| A2, A3 | **0.0691, 0.0708** | 0.0278, 0.0468 | first |
+| B1–B4 | **0.037–0.053** | 0.021–0.033 | first |
+| B5 | 0.0279 | **0.0518** | second |
+| C1–C4 | 0.018–0.023 | **0.028–0.053** | second |
+| C5 | 0.0193 | **0.0478** | second, 2.5× |
+
+`tools/focusmerge.py` (new; `docs/PIPELINE.md` § Merging several shots) registers
+one onto the other and keeps whichever is sharp at each point. Every print in the
+result reaches the better frame's sharpness — **worst 96.9%, mean 100.5%** — where
+keeping `002232944` alone leaves A1 at 40% of what was available, and keeping
+`002255786` alone does the same to C5. The merged frame then goes through a normal
+run as an ordinary input; it is not part of the pipeline and never runs on its own.
+
+### Adopted into `chekis/main`
+
+The two originals moved to `chekis/main/raw/` and the merge went in loose as
+`002232944.MERGE.jpg` — the reference's timestamp, which is what its
+EXIF carries, with `.MERGE` for `.MP` so the name cannot collide with a file
+already in `balanced/` and be skipped as done. Their stale `balanced/` copies were
+deleted by hand; nothing prunes an output whose source has left the folder.
+
+The batch went 124 → 123 loose files, `balanced/` 121 → 120, and the desk target
+moved from `[60.8, 41.1, 29.6]` over 117 files to `[60.8, 41.0, 29.6]` over 116 —
+a tenth of a level on green. That number is the whole reason for retiring the
+originals rather than leaving three frames of one shoot in the batch: the target is
+folder-wide, so a near-duplicate votes twice on what every other photo is matched
+to. The merge itself measured `aligned → balanced`, no flags, gains
+1.109/1.053/1.045, sitting between the two originals' own 1.121/1.054/1.056 and
+1.154/1.074/1.055.
+
+The move also broke the two real-photo tests *silently*, in the way this repo keeps
+finding: `_photo(chekis/main, "002232944")` still matched — the **merge** now
+carries that timestamp — and then the second file came back None, so both tests
+skipped and reported green. They go through `_merged_source()` now, which looks in
+`raw/` first.
+
+### The homography is not enough, and the residual is invisible
+
+SIFT + RANSAC lands 1996 of 2530 matches as inliers at 0.73 px median
+reprojection, which reads like a finished job. It isn't: phase-correlating each
+card afterwards showed **up to 1.4 px still left**, and structured — row C sat
+0.7–1.1 px low as a group, row A and B around zero. That is lens distortion, which
+a projective transform cannot represent, showing because the two shots were framed
+at slightly different distances.
+
+It matters because of *where* it lands. The changeover between the two focus zones
+is precisely where both frames contribute, so a pixel of misalignment softens the
+prints in the tie band — undoing the merge exactly where the merge is doing work.
+Before local refinement B4 came out **11.9% below** the better single frame; after,
+2.5%, and the worst of the thirteen went from 88% to 97%.
+
+### Two calibrations that came out of measurement, not taste
+
+- **The exposure gain must be fitted on low-passed frames.** Plain least squares
+  over the pixels is biased by the focus difference itself — where the reference
+  is sharp and the other frame soft the ratio reads high, where it is reversed it
+  reads low, and they do not cancel, because the sharp frame carries the
+  high-frequency energy the sum is weighted by. On a fixture built with a known
+  1.06 stop the pixel fit returned **0.904** against a true 0.943; blurring both to
+  8 px first returns 0.948. The same pass also excludes pixels clipped in *either*
+  frame rather than only in the reference — worth three points while the fit ran on
+  the pixels, and, once measured again behind the low-pass, worth nothing even on a
+  fixture whose middle third is blown. It stays because it is correct and free, not
+  because it is doing work; no test pins it, because none can fail.
+- **The moved-print check is a cubic fit, and its tolerance is the gap it
+  measured.** Fitting the 84 measured tile shifts leaves 1.89 px at first order,
+  1.58 at second, **1.22 at third** — cubic because radial distortion displaces by
+  k·r²·r. `MOVE_TOL` = 3 px therefore clears the honest scatter by 2.5× while a
+  nudged print moves by tens.
+
+### What was tried first for the movement check and rejected
+
+Blur both frames past their own defocus and read the leftover difference as
+displacement, |ΔI| / |∇I|. It reported **five moved regions on a pair where nothing
+moved**: no blur wide enough to erase the focus difference leaves the picture
+intact. The tile shifts the refinement already measures answer it directly and for
+free, since a moved print is not "different" but *off the smooth field every other
+tile shares*.
+
+### The smooth blend is a deliberate trade, not a free win
+
+Blurring the *decision* before applying it (`BLEND_SIGMA` = 25) is what keeps a
+seam off a card edge. Measured against a hard per-pixel pick it is also slightly
+*worse* by the sharpness metric — worst print 96.3% against 97.7%, because the tie
+band goes to one frame outright instead of a mixture — and that is the honest
+number to record. What the hard pick produces instead is a patchwork: 2.4% of
+pixels differ by more than 4/255, in blobs following pixel-scale noise in the
+sharpness measure rather than anything in the photograph. Which frame a pixel comes
+from should be a property of the region; at pixel scale the two frames' grain and
+whatever sub-pixel misalignment survives get interleaved. The 1.4 points buy that.
+
+### Tests
+
+`tests/test_focusmerge.py`, fourteen of them, synthetic fixtures plus an opt-in
+tier on the real pair. Mutation-checked one at a time, per the rule that a test
+nobody has watched fail is not yet a test — thirteen breakages, each firing a test
+that names what broke:
+
+| broken | fires |
+|---|---|
+| sharpness loses the log | takes the sharp side |
+| blend stops picking (straight average) | takes the sharp side, keeps the reference, real pair |
+| decision blur off, or cut to 4 px | switch is gradual |
+| sharpness window cut to 5 px | real pair |
+| exposure match dropped | anchored to the reference tone |
+| local refinement disabled | refinement beats the homography |
+| `MOVE_TOL` → 500 (never fires) | lens is not movement, print that moved |
+| `MOVE_TOL` → 0.4 (always fires) | five, including both real-pair tests |
+| gain fitted on pixels, not low-passed | anchored to the reference tone |
+| `MIN_INLIERS` → 1 | a stranger is refused |
+| moved-tile model → quadratic | lens is not movement |
+| uncovered tiles allowed to vote | tiles the other shot doesn't cover |
+
+The first pass left four of those firing nothing, and fixing that is where four of
+the tests came from — the gradual-switch test, the lens-versus-movement test, the
+coverage test, and a rewrite of the refinement test that had been passing against
+the wrong baseline. Several fixture bugs surfaced the same way, and all are
+documented in the fixture itself, because each would have quietly weakened the
+suite:
+
+- The refinement test **passed with the refinement turned off**. It measured the
+  residual against the *raw* second frame, where the camera move alone is 27 px, so
+  any correction at all cleared the bar. It compares against the homography's own
+  output now — 0.74 px median tile shift down to 0.23 — which is the only number
+  that says anything about the step being tested.
+- `_barrel` took a fixed coefficient, and radial displacement goes as k·r²·r, so
+  enlarging the fixture once took its distortion from 2.5 px to **35** and made the
+  alignment look broken. It is sized by the corner displacement it wants now.
+- The defocus was σ = 3.2 on a 1600 px frame — far stronger, relative to the frame,
+  than a phone's. Phase-correlating a sharp tile against one that blurred puts a
+  ±2 px noise floor on the tile shifts, which buried the residual the refinement
+  was supposed to remove: 0.95 px in, 0.82 out, against 0.89 → 0.28 on the real
+  pair. At σ = 2.2 the fixture behaves like the photographs do.
+- The card windows were first filled with plain **noise**, and registration
+  collapsed to 6 inliers — noise has no keypoint that survives being blurred. They
+  are drawn shapes with grain on top now: shapes for SIFT to match, grain for the
+  defocus to take away.
+- `_soften` blurred in **sRGB**, which darkens whatever it touches (the curve is
+  convex, so smoothing away contrast lowers the linear mean). That gave the fixture
+  a 9% brightness step between its sharp and soft halves that no gain could match
+  and that read as the merge shifting tone. Real defocus happens in linear light,
+  and so does the fixture's now.
+
+The fixture is also deliberately **large** — cards 290×458, frame ~1600 px. At half
+that, the tool's 10×10 tile grid gets tiles too small for phase correlation to be
+steady, the scatter reaches 3.4 px, and the movement check cries wolf on a still
+desk. That is a property of the fixture, not of the tool, and shrinking the fixture
+to save a few seconds would have bought a false alarm instead.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
