@@ -1917,6 +1917,34 @@ would have distorted and not announced as something it isn't.
   the output's coordinates against each raw frame in its own. Measured
   like-for-like, two Lanczos resamples cost **0.7%**.
 
+### Two apps on one project site: you get one, with a shortcut
+
+The first attempt gave Focusmerge its own manifest and expected a second home
+screen icon. Chrome answered **"This app is already installed — click to open the
+app instead"**, and it was right to. Identity was never the problem: an app's id
+defaults to its `start_url`, so the two were already distinct
+(`/checleaner/` and `/checleaner/focusmerge.html`). **Scope** is the problem.
+Checleaner declares `"scope": "./"`, which on a GitHub project site is the entire
+published directory, so every page of the site is a page Chrome considers that
+app to own — and nothing can escape it, because the site root *is* that
+directory.
+
+The fix is to stop fighting it. Focusmerge links the **app's** manifest, not one
+of its own, and is reached as a `shortcuts` entry: long-press the Checleaner icon
+and it opens standalone in the app window. The rival manifest is deleted; it
+changed nothing and only added a second identity to no end.
+
+The alternative was to move Checleaner's `start_url` and `scope` into a
+subdirectory so its scope no longer covered its sibling. That buys a second icon
+for the price of re-identifying an installed app — the existing install orphaned,
+reinstalled, and the Android share-target registration migrated with it. Not
+worth it for two tools on one site.
+
+Both pages also link to each other now, since a shortcut nobody knows about is
+not discoverable. The way back needs a line of script: the app is
+`checleaner.html` in the repo and `index.html` once published — the workflow
+renames it — so a fixed href is dead in one of the two places.
+
 ### Tests
 
 `tests/test_webfocus.py`, ten of them, driven through the real page by

@@ -32,7 +32,7 @@ jobs:
           mkdir -p _site
           cp checleaner.html _site/index.html
           cp focusmerge.html _site/focusmerge.html
-          cp web/manifest.webmanifest web/focusmerge.webmanifest web/sw.js _site/
+          cp web/manifest.webmanifest web/sw.js _site/
           cp web/icon-192.png web/icon-512.png web/apple-touch-icon.png _site/
           # YuNet, MIT (Shiqi Yu), byte-identical to the model checleaner.py uses
           cp web/face_detection_yunet_2023mar.onnx _site/

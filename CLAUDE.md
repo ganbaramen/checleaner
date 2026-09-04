@@ -169,6 +169,17 @@ resolution. The only thing sharing the app would have bought is the only thing
 that cannot be shared. `tools/webfocus.py` drives it the way `webdetect.py`
 drives the app; `?debug` on the URL keeps the aligned frames for calibration.
 
+**It is a page of the Checleaner PWA, not a second app.** A GitHub project site
+is one directory and `checleaner.html` scopes itself to all of it, so Chrome
+treats every page here as one the installed app owns — a rival manifest just
+earns "This app is already installed". Focusmerge therefore links
+`manifest.webmanifest` and is reached from that manifest's `shortcuts` entry
+(long-press the icon) and from a link at the foot of each page. Giving it a
+separate icon would mean moving Checleaner into a subdirectory and re-identifying
+the installed app; that trade was considered and declined, see `docs/HISTORY.md`.
+Note the back-link is set in script, because the app is `checleaner.html` in the
+repo and `index.html` once published.
+
 Its numbers are calibrated against its own decoder, like the app's, and it is
 **not the same algorithm**: ORB rather than SIFT, a hand-written FFT, a bicubic
 warp. One difference is load-bearing and pinned by a test — ORB tolerates about
