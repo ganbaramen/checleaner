@@ -1977,6 +1977,68 @@ exists to prevent cannot form. Turning it off moves the worst print by 1.4 point
 4/255. It stays for the day the grid gets finer, and the comment says so rather
 than a test pretending otherwise.
 
+## 2026-09-07 — six shots of one layout, and a typo that cost the whole merge
+
+Six frames this time, not two: `011234498`, `011246463`, `011315960`,
+`011325422`, `011329939`, `011349293`, all the same undisturbed arrangement,
+all already cropped square in-camera at slightly different sizes (2679² up to
+3044×3046). Every one aligned — 1651–4312 inliers, reproj 0.62–1.12 px — and
+nothing was reported as having moved.
+
+**Every frame earned its place.** Share of the result: 4% reference, then 17,
+23, 3, 13, 40. Against the per-tile best available anywhere in the set (16×16
+grid, linear light, top half of tiles by detail so a featureless stretch of desk
+does not vote), the merge reaches **worst 62.6%, mean 93.5%**, where the best
+single frame leaves its worst tile at 25% of what was available and the rest
+leave 5–17%. The frames disagree by a median 4.1× on those tiles and by up to
+19.8×, which is a far wider focus spread than the reference pair's 2.5×.
+
+That mean is below the pair's 100.5%, and the reason is not the JPEG (a q96
+re-encode measures at 100.3%). With six frames the softmax spreads weight across
+several of them wherever two are close, and averaging two near-equal frames is
+softer than either. Dropping the two with the worst residual after refinement
+(`011246463` at 5.06 px, `011325422` at 3.50 px, 3% share) makes it **worse**,
+not better — worst tile 44.6%, mean 93.2% — so they are carrying detail nothing
+else has. Six it is.
+
+One frame needed a blue gain of **0.849**, a 15% white-balance swing where the
+other four stayed within 5%. Corrected without incident; noted because it is the
+largest exposure match this tool has been asked for.
+
+### Adopted into `chekis/main`
+
+Originals to `raw/`, merge in as `PXL_20260907_011234498.MERGE.jpg`. They had
+never been run, so there were no `balanced/` copies to delete. The batch went
+from 124 to 131 files (the merge plus six unrelated shots from the same
+evening); all seven landed in `balanced/` with no flags, leaving 128 there and
+3 in `review/`. The folder-wide desk
+median moved [60.6, 40.8, 29.6] → [61.1, 41.5, 29.6] out of 255 with five more
+files voting — under a level, as it should be.
+
+Worth knowing for the next one: **the first file sets the framing**, and here it
+was the smallest of the six, so the merge inherits the tightest crop. These
+pre-cropped frames also have a black floor of 25/21/15 rather than the 0–3 an
+uncropped photo shows — the darkest 0.5% is desk, not shadow, because no shadow
+is left in frame. It did not hurt the result (the balanced output's black lands
+at 4/4/1, next to the earlier merge's 6/5/3), but the black anchor is frame-wide
+by design and a crop that excludes the shadow is exactly the case that assumption
+does not cover.
+
+### The typo
+
+`-o merged.jpy`. cv2.imwrite picks its encoder from the extension, finds no
+writer, and raises — *after* six frames have been read, registered, refined and
+blended. Every second of that work, then a traceback and no file.
+
+The extension is now checked immediately after argument parsing, against the set
+OpenCV has a writer for, and `imwrite`'s return value is checked too: it reports
+failure by returning `False` rather than raising, so an unwritable directory
+would have printed a cheerful `-> merged.jpg` over nothing at all.
+
+The test asserts the *ordering* rather than the message — it replaces `merge()`
+with a function that raises, so putting the guard back below it fails. Verified
+by deleting the guard and watching it fire, as everything here should be.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original
