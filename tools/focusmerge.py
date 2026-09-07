@@ -40,6 +40,10 @@ from checleaner import to_linear, to_srgb, _copy_exif
 
 # ------------------------------------------------------------------ constants
 
+# Extensions OpenCV has a writer for, checked before the work rather than after.
+# EXIF is only spliced onto the JPEG ones; the rest simply don't carry it.
+WRITABLE = {".jpg", ".jpeg", ".jpe", ".png", ".webp", ".tif", ".tiff", ".bmp"}
+
 SIFT_FEATURES = 8000
 MATCH_RATIO = 0.75          # Lowe's ratio; 2530 of 8000 survive it on the real pair
 RANSAC_PX = 3.0
@@ -407,6 +411,16 @@ def main() -> int:
     if not args.out and not args.check:
         print("give -o OUT, or --check to report without writing", file=sys.stderr)
         return 2
+    # Checked here rather than left to imwrite: the merge is minutes of work, and
+    # cv2 picks its encoder off the extension, so a typo (`merged.jpy`) throws
+    # only at the very end -- after every frame has been aligned and blended.
+    if args.out:
+        ext = os.path.splitext(args.out)[1].lower()
+        if ext not in WRITABLE:
+            print(f"can't write '{ext or args.out}' -- OpenCV picks its encoder from "
+                  f"the extension. Use one of: {', '.join(sorted(WRITABLE))}",
+                  file=sys.stderr)
+            return 2
 
     frames, names = [], []
     for path in args.files:
@@ -436,7 +450,9 @@ def main() -> int:
         print(f"\n--check: {out.shape[1]}x{out.shape[0]} merge not written")
         return 0
 
-    cv2.imwrite(args.out, out, [cv2.IMWRITE_JPEG_QUALITY, args.quality])
+    if not cv2.imwrite(args.out, out, [cv2.IMWRITE_JPEG_QUALITY, args.quality]):
+        print(f"couldn't write {args.out}", file=sys.stderr)
+        return 1
     _copy_exif(args.files[0], args.out, out.shape[1], out.shape[0])
     print(f"\n-> {args.out}  ({out.shape[1]}x{out.shape[0]}, "
           f"EXIF from {names[0]})")

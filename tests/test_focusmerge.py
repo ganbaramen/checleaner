@@ -539,6 +539,32 @@ def test_cli_writes_a_file_and_check_does_not():
             sys.argv = argv
 
 
+def test_cli_rejects_an_extension_opencv_cannot_write_before_doing_the_work():
+    """A typo in -o must fail in the first second, not the last.
+
+    cv2.imwrite picks its encoder from the extension, so `merged.jpy` throws
+    only once every frame has been aligned and blended -- minutes of work, then
+    a traceback and no output. This asserts the guard runs *before* the merge,
+    by making the merge itself explode: move the check after it and this fails.
+    """
+    import tools.focusmerge as fm
+    f1, f2 = make_pair()
+    with tempfile.TemporaryDirectory() as tmp:
+        p1 = os.path.join(tmp, "one.jpg")
+        p2 = os.path.join(tmp, "two.jpg")
+        cv2.imwrite(p1, f1)
+        cv2.imwrite(p2, f2)
+        argv, real = sys.argv, fm.merge
+        def boom(*a, **k):
+            raise AssertionError("the extension was checked after the merge, not before")
+        try:
+            fm.merge = boom
+            sys.argv = ["focusmerge", p1, p2, "-o", os.path.join(tmp, "merged.jpy")]
+            assert fm.main() == 2
+        finally:
+            sys.argv, fm.merge = argv, real
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
