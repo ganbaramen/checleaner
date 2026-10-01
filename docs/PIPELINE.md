@@ -413,12 +413,16 @@ hand, which is much cheaper than mangling a real row. Closing this properly
 means giving the JS a true external-contour area so its solidity sees the
 notches, not moving the count.
 
-Two of the 106 files in `chekis/main/` give the phone app no blob at all
-("couldn't find a white border in this photo") where Python segments them
-fine: `053032673` and `140740030`. Same
-decoding difference, at the other end — the JS mask never reaches the 3 % area
-floor. Long-standing, unchanged by the § 6 port, and left alone: the app tells
-the user plainly and does nothing destructive.
+Six files in `chekis/main/` used to be refused by the phone app ("couldn't
+find a white border in this photo") where Python ran them fine. Two of them,
+`053032673` and `140740030`, were noted here and put down to segmentation, which
+it never was — a missing
+blob only sends `measure()` back to the frame-wide white read. The refusal was
+the *black* point: both frames hold enough pure black that 0 is their 0.5th
+percentile, and the port's strict `lum < lumLo` selected nothing. `082626201`
+(1.7 % lum 0) is what exposed it. The page now falls back to `<=` when the
+strict mask is empty, which is checleaner.py's own fallback, and all six
+balance. See the 2026-10-01 entry in `docs/HISTORY.md`.
 
 ## 4. Crop
 

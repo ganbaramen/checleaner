@@ -110,6 +110,23 @@ def add_glare(img, seed=9):
     return img.astype(np.uint8)
 
 
+def make_single_crushed_black(frame_w=1200, seed=0):
+    """A lone card whose near-black block is crushed to exactly 0 -- about 2% of
+    the frame, so pure black *is* the 0.5th percentile. A strict `lum < p0.5`
+    then selects nothing and there is no black point at all: the app refused
+    082626201 (1.7% lum 0) that way while checleaner.py, already on `<=`, ran it."""
+    img = make_single(frame_w, seed=seed)
+    h, w = img.shape[:2]
+    card_h = int(h * 0.62)
+    card_w = int(card_h / ASPECT)
+    y0, x0 = (h - card_h) // 2, (w - card_w) // 2
+    mx, narrow, wide = int(card_w * 0.06), int(card_h * 0.05), int(card_h * 0.16)
+    wy0, wx0 = y0 + narrow, x0 + mx
+    bh, bw = (card_h - narrow - wide) // 4, (card_w - 2 * mx) // 3
+    img[wy0:wy0+bh, wx0:wx0+bw] = 0
+    return img
+
+
 def make_single_with_glare(frame_w=1200, seed=0):
     """A lone card plus a patch of desk glare that segments as its own blob."""
     return add_glare(make_single(frame_w, seed=seed), seed=seed + 9)
@@ -349,6 +366,16 @@ def test_colour_targets_hit_238_and_2():
     white, black = to_srgb(after.white), to_srgb(after.black)
     assert np.all(np.abs(white - 238.8) < 0.8), f"white landed {np.round(white,2)}, want 238.8"
     assert np.all(np.abs(black - 2.2) < 0.8), f"black landed {np.round(black,3)}, want 2.2"
+
+
+def test_crushed_black_still_has_a_black_point():
+    """Enough pure black to *be* the 0.5th percentile must still be measured.
+    With `lum < p0.5` the mask is empty and the black point is NaN, which
+    poisons every channel's gain without a word. Pinned here so the `<=` can't
+    quietly regress on this side the way the port had it."""
+    m = measure(make_single_crushed_black().astype(np.float32))
+    assert np.all(np.isfinite(m.black)), f"black point {m.black}"
+    assert np.all(to_srgb(m.black) < 1.0), f"black read {to_srgb(m.black)}, want ~0"
 
 
 def test_paper_confinement_leaves_the_normal_desk_alone():

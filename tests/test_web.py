@@ -49,6 +49,7 @@ from PIL import Image
 from checleaner import measure, to_srgb, ASPECT, build_parser
 from test_pipeline import (skip, _Skip, _photo, REAL_REORIENT, REAL_UPRIGHT,
                            make_single, make_single_with_glare,
+                           make_single_crushed_black,
                            make_single_with_welded_glare, make_card_on_pale_desk,
                            make_row, make_signed_row, make_staggered_pile, make_grid,
                            make_flush_grid, add_glare)
@@ -74,6 +75,7 @@ WEB_FIXTURES = {
     "single":            lambda: make_single(),
     "single_upsidedown": lambda: make_single(upside_down=True),
     "single_glare":      lambda: make_single_with_glare(),
+    "crushed_black":     lambda: make_single_crushed_black(),
     "welded_glare":      lambda: make_single_with_welded_glare(),
     "pale_desk":         lambda: make_card_on_pale_desk()[0],
     "row2":              lambda: make_row(cols=2),
@@ -197,6 +199,7 @@ WEB_KINDS = {
     "single":            "single",
     "single_upsidedown": "single",
     "single_glare":      "single",          # glare as its own blob, filtered out
+    "crushed_black":     "single",          # was no-blob: no black point at all
     "welded_glare":      "single",          # glare welded on, trimmed off
     "pale_desk":         "single?",         # see test_pale_desk_is_not_croppable
     "row2":              "multi-aligned",
@@ -397,6 +400,18 @@ def test_web_output_hits_the_colour_targets():
         black = to_srgb(measure(output(name)).black)
         assert np.all(np.abs(black - 2.2) < 1.0), \
             f"{name}: black landed {np.round(black, 2).tolist()}, want 2.2"
+
+
+def test_web_crushed_black_is_balanced_not_refused():
+    """A frame with enough pure black to *be* the 0.5th percentile. The page
+    used `lum < p0.5` where checleaner.py has `<=`, found no black pixels, and
+    refused the photo as "couldn't find a white border" -- 082626201 in
+    chekis/main, and the two files docs/PIPELINE.md § 3 had put down to
+    segmentation. The message was never about the border."""
+    assert row("crushed_black")["kind"] != "no-blob", "page refused the photo"
+    black = to_srgb(measure(output("crushed_black")).black)
+    assert np.all(np.abs(black - 2.2) < 1.0), \
+        f"black landed {np.round(black, 2).tolist()}, want 2.2"
 
 
 def test_web_a_pale_background_does_not_drag_the_white_anchor():

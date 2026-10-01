@@ -2039,6 +2039,41 @@ The test asserts the *ordering* rather than the message — it replaces `merge()
 with a function that raises, so putting the guard back below it fails. Verified
 by deleting the guard and watching it fire, as everything here should be.
 
+## 2026-10-01 — "couldn't find a white border" was the black point
+
+`082626201` was refused by the phone app and run normally by checleaner.py. The
+message pointed at detection, but a missing blob can't produce it: with no paper
+mask `measure()` just takes white frame-wide. It returns null only when a
+*reference* is empty, and here that was black. 1.7 % of the analysis frame is
+lum 0, so 0 is the 0.5th percentile and the port's `lum < lumLo` selected
+nothing. checleaner.py had already met this and uses `<=`, with a
+`lum <= lum.min()` fallback.
+
+Porting `<=` as-is was tried first and rejected. It recovered the photo but moved
+125 of 174 sweep files and failed `test_web_output_hits_the_colour_targets`
+(plain `single` black landing at 1.13 against 2.2). `solveLevels` re-measures an
+8-bit scratch, not floats as `solve_levels` does, so the corrected blacks tie on
+whole numbers and `<=` drags extra pixels into the mean. The page now keeps `<`
+and falls back to `<= lumLo` only when that is empty. Since lumLo is then the
+minimum, this is exactly Python's fallback.
+
+Sweep of `chekis/main/` against the pre-fix page: **6 of 174 changed, and they
+are exactly the 6 the page used to refuse.** The other 168 are identical in every
+field, thumbprint included. Recovered: `053032673` and `082648513` (single),
+`140740030` and `075655919` (multi-aligned), `212717904` (single, with a
+"desk still on the top edge" note), and `082626201`
+(single?, gain 2.79 / 1.57 / 1.36 against Python's 2.74 / 1.56 / 1.35. Both
+flag it as a strong correction; the photo really is that blue). Two of these were
+documented in PIPELINE.md § 3 as a segmentation gap. They weren't, and that note
+is corrected.
+
+Tests: `make_single_crushed_black` (the near-black block set to 0, 1.9 % of the
+frame) in both suites. Mutation-checked: removing the page's fallback fails
+`test_web_crushed_black_is_balanced_not_refused` and the classification test,
+and reverting both of Python's guards to `<` fails
+`test_crushed_black_still_has_a_black_point` with a NaN black point. Reverting
+just one of Python's two guards does *not* fail it, because the other covers.
+
 ## Known unfixable, so nobody re-litigates them
 
 - **Blown white references.** Where the paper is already clipped in the original

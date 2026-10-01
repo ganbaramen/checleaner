@@ -232,7 +232,7 @@ thumbprint is the *only* field that can move. Assume the next blind spot exists
 and test for it the same way.
 
 Two things to know before concluding the app has hung: the page has three
-terminal states, not one (done, "couldn't find a white border", and thrown), and
+terminal states, not one (done, "couldn't measure white and black levels", and thrown), and
 it swallows JS exceptions while still showing a result — so a silent page error
 looks like a clean run. `webdetect.py` waits on all three and reports page
 errors loudly. There is still no *assertion* harness — see Next steps.

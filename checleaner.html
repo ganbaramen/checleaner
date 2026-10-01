@@ -336,6 +336,17 @@ function measure(data, w, h, paper) {
     if (lum[i] > lumHi) { bright++; if (mx >= 250) clipped++; }
     if (lum[i] < lumLo) { br += LIN[data[p]]; bg += LIN[data[p + 1]]; bb += LIN[data[p + 2]]; bn++; }
   }
+  // A frame with enough pure black piles it onto the minimum until it *is* the
+  // 0.5th percentile, and the strict less-than above matches nothing --
+  // 082626201 is 1.7% lum 0, and the page refused it as "couldn't find a white
+  // border" while checleaner.py ran it. Empty means lumLo is the minimum, so
+  // this is checleaner.py's `lum <= lum.min()`. Only as a fallback, though, not
+  // Python's `<=` throughout: solveLevels re-measures an 8-bit scratch, where
+  // the corrected blacks tie in whole numbers, and a blanket <= drags the
+  // calibrated 2.2 down to 1.1 on an ordinary frame.
+  if (!bn)
+    for (let i = 0, p = 0; i < n; i++, p += 4)
+      if (lum[i] <= lumLo) { br += LIN[data[p]]; bg += LIN[data[p + 1]]; bb += LIN[data[p + 2]]; bn++; }
 
   // white: bright, smooth, unclipped -- kept as indices so the mask can be
   // narrowed afterwards without rebuilding it
@@ -1765,7 +1776,10 @@ async function process(file) {
   setStatus("measuring white and black…");
   await nextFrame();
   const m0 = measure(sdata.data, aw, ah, det.paper);
-  if (!m0) { setStatus("couldn't find a white border in this photo."); return null; }
+  // Not "couldn't find a white border": that is what this used to say, and it sent
+  // everyone looking at detection, which can't cause it -- see docs/HISTORY.md
+  // 2026-10-01. measure() is null only when a reference itself is empty.
+  if (!m0) { setStatus("couldn't measure white and black levels — the highlights may be blown out."); return null; }
   const { gain, off } = solveLevels(sdata.data, aw, ah, m0, det.paper);
   const lut = buildLUT(gain, off);
 

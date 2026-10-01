@@ -29,7 +29,9 @@ Needs Playwright (`pip install playwright && playwright install chromium`),
 which the pipeline itself does not -- this is a dev tool, not part of a run.
 
 Note the page has three terminal states, not one: it can finish, it can report
-"couldn't find a white border in this photo" (two files in `chekis/main/` do),
+"couldn't measure white and black levels" (none in `chekis/main/` do; six did,
+under the older wording "couldn't find a white border", until 2026-10-01 -- see
+docs/HISTORY.md),
 and it can throw. Waiting only for success hangs on the second, which is worth
 knowing before you conclude the app has locked up.
 """
@@ -155,7 +157,7 @@ def summarise(name: str, out: dict) -> dict:
     # available before `lastDetection` existed, and they lie by omission: a crop
     # that also raises "orientation uncertain" shows *only* that warning, so two
     # cleanly cropped singles were being filed as "other".
-    if "couldn't find a white border" in status:
+    if "couldn't measure white and black levels" in status:
         kind = "no-blob"
     elif det.get("cropped"):
         kind = "single"
